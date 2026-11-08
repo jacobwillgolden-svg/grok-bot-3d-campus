@@ -19,7 +19,9 @@ approvals and numbers are all made up, and no button contacts anything.
 - **What it reads:** your main bot reads its own team chats and your other bots' transcripts, read-only, plus routines and usage.
   It never creates, changes or deletes a bot or team.
 - **What goes online:** one JSON file the bot writes: team and bot names, what each works on, task titles, items waiting for
-  your approval, routine schedules and usage %. No full chats or files. It's stored privately in **your own** Vercel account.
+  your approval, routine schedules and usage %. **In this fork, also a copy of your team's chats with the bots** (message
+  text, sender, time; no files or tool calls; the app's own secrets are redacted before upload). It's stored privately in
+  **your own** Vercel account.
 - **Who can open it:** only someone with your private link (a random token). Everything else returns 404, and search engines
   are told not to index it. You can add a Vercel login on top for free on any plan (SKILL section 10.1).
 - **Who can act:** buttons send requests to your main bot, signed with a key only you paste in. The bot decides. Anything that
@@ -64,6 +66,9 @@ The full list with triggers is in [`skill/SKILL.md`](skill/SKILL.md#ui-states-re
 - **Team rooms**: walk in and look around. Lead and member bots at their desks, a task board
   (to do / in progress / done), a live activity screen, a goal gauge, a usage battery and a
   scheduled-tasks panel with live countdowns and failure alerts.
+- **💬 Chats** (this fork): your team's conversations with its bots, copied from Grok: every team group chat and every
+  bot's direct chat, with a chat list, unread dots, search across all chats, and the bots in their Grok avatars. Open it
+  from **Chats** in the top bar, **C**, or **💬 Chat history** on any bot. New messages arrive with each refresh.
 - **History** (this fork): one searchable, full-height panel with every bot event and every request you sent, grouped by
   day and filterable by team. The real app keeps an archive in your private Blob, so events stay after each refresh
   (newest 2000, 90 days). Open it from **History** in the top bar, the LIVE bar, **F**, or **🕘 Full history** in a room.

@@ -29,6 +29,13 @@ in your private chat what failed, in one or two sentences, and what you need fro
 > `AVATARS` map in the data (section 11). Entries are keyed by family name, so "Captain America" also covers
 > "Captain America - Team", "Captain America - Ryan" and later ones. The server keeps the map across pushes. Bots without an
 > entry keep the default look, so the visual check is unchanged until you add one.
+>
+> **Main feature of this fork: the team's chat history (💬 Chats).** The user's team talks to its bots in Grok chat, and
+> this page shows a copy of those conversations: every team group chat and every bot's direct chat, searchable, with the
+> bots drawn in their Grok avatars. You upload new messages on every full refresh with `push-messages.sh` (section 3 step 7
+> for the first upload, section 7.1 step 6b afterwards). They are stored in the same private Blob, one file per chat
+> (newest 3000 messages), and read through `GET /api/chats` with the same cookie as `/api/data`. The panel's other tab,
+> 📰 Activity, is the activity feed described above.
 
 The user gives you only that repo link. You download everything yourself (next section) and work only from the downloaded
 files. `<SRC>` below means `~/control-center/src`, the downloaded repo. Every `skill/reference/...` path in this file is inside it.
@@ -42,7 +49,10 @@ against the code yourself before you start; the user decides in section 0 whethe
   "please add me to the group" note per lead (section 2).
 - **What goes on the site:** one JSON file you write (section 11): team, bot and role names, one-line "working on" and
   "next", short activity and speech lines, task titles, the text of items waiting for the user, routine names and schedules,
-  and usage percentages. No transcripts, files or attachments. It sits in a private Blob store in the **user's own** Vercel account.
+  and usage percentages. **Plus, in this fork, a copy of the team's chats** (section 11): the text of each message in the
+  team group chats and in each bot's direct chats, with sender name and time. No tool calls, files or attachments, and
+  `push-messages.sh` replaces the app's own secrets with `[redacted]` before anything is sent. It all sits in a private Blob
+  store in the **user's own** Vercel account.
 - **Who can open it:** only someone holding the private link (a random 32-byte token), which sets a signed cookie. Every other
   path answers 404 with `X-Robots-Tag: noindex`, and `robots.txt` disallows all, so search engines can't index it. There is no
   password; anyone who gets the link sees the data, which is why section 10 keeps secrets and customer details out of it.
@@ -176,7 +186,7 @@ Team/agent colours in order: `#2f8cff`, `#2ecc71`, `#ff8a1f`, `#ff2d9b`, `#8f5bf
 
 **Campus** (`Campus3D.tsx`, three.js):
 - 6 active slots, two rows of 3, around a central plaza with a clock tower (magenta roof, live clock faces, pulsing magenta rings).
-  3 frozen slots in a column on the left. Extra teams get generated rooms in columns of 3 (section 3, step 8). Curved roads with moving dashes run from the plaza to each active room; small blobs walk them. Trees around.
+  3 frozen slots in a column on the left. Extra teams get generated rooms in columns of 3 (section 3, step 9). Curved roads with moving dashes run from the plaza to each active room; small blobs walk them. Trees around.
 - Camera: perspective, FOV 34°. Default view looks at the campus straight from the front (azimuth 0), polar angle 0.6 rad
   (about 55° down), fitted to the free screen area. Orbit limits: polar 0.2–1.28 rad, distance 3–55. Left drag pans,
   right drag rotates, wheel zooms; buttons + − ⟲ ⟳ ⌂. Clicking a room flies the camera to it (polar 0.9).
@@ -351,8 +361,19 @@ Build one JSON document, `~/control-center/data.json`, in the schema in section 
    don't show avatars, ask the user once in your private chat for a screenshot of their bot list and read the colours and
    shapes from it. Never guess a colour. The server keeps the last `AVATARS` it received, so send it again only when a bot
    family is added or changes (a push without `AVATARS` keeps the saved one; `{}` clears it).
-7. `UPDATED` = now in the user's time zone, formatted like `3.11.2026, 14:59 (Europe/Berlin)`.
-8. Rooms: every team in `TEAMS` gets its own room. The first 6 non-frozen teams take the 6 spots around the plaza and
+7. **Chats (first upload).** Export every conversation the user's team has with its bots into
+   `~/control-center/messages.json` (schema in section 11) and upload it with `./push-messages.sh ~/control-center/messages.json`
+   from the app folder (after section 5; it sends in batches). Include:
+   - every team group chat you can read (your room turns), with every message from the user, teammates and bots;
+   - each bot's direct chat (from `ReadTranscript` on that bot): the messages between it and the people it talks to, and
+     messages other bots sent it;
+   - your own private chat with the user.
+   Go back as far as your tools allow, up to 3000 messages per chat. Only message text: no tool calls, tool results or
+   hidden reasoning. `role` is "user" for a person (the user or a teammate), "bot" for any bot. Use the platform's message id
+   when you can see one. Then save, per chat id, the time of the newest message you uploaded in
+   `~/control-center/state/chat_cursor.json` (not secret). If a chat can't be read, skip it and say so in your summary.
+8. `UPDATED` = now in the user's time zone, formatted like `3.11.2026, 14:59 (Europe/Berlin)`.
+9. Rooms: every team in `TEAMS` gets its own room. The first 6 non-frozen teams take the 6 spots around the plaza and
    the first 3 frozen teams the side wing; any team beyond that gets a generated room (extra active rooms in columns of 3
    on the right, extra frozen rooms in columns of 3 on the left), and the camera and the minimap frame all of them.
    Do not hide or re-status a team to save space. `TEAMS` order = room order (keys 1–9 open the first nine; `]` / `[` walk
@@ -506,6 +527,12 @@ App folder: <~/control-center/app>. Data file: <~/control-center/data.json>. Tim
 5. Usage: CheckSubscriptionUsage with breakdown ["bot"], limit 20 -> USAGE, each team's usage, botUsage (new bots too, once listed).
 6. Set UPDATED (user's time zone), run ./push-data.sh <data file> in the app folder (no redeploy), and check that
    GET /api/data shows the new UPDATED.
+6b. Chats: for every team group chat and every bot's direct chat (and your own chat with the user), collect the messages
+   newer than that chat's time in ~/control-center/state/chat_cursor.json (minus 10 minutes of overlap; the server drops
+   duplicates). New chats and new bots start from as far back as you can read. Write them to ~/control-center/messages.json
+   (skill section 11: id, name, kind, team, bot, participants, messages with at/from/role/text; only message text, no tool
+   calls) and run ./push-messages.sh ~/control-center/messages.json in the app folder. On success, update chat_cursor.json.
+   If it fails, keep the old cursors (the next refresh re-sends) and go on with step 7.
 7. Only after step 6's check succeeds: write the time (date -Iseconds) to ~/control-center/state/last_full_refresh and delete ~/control-center/state/dirty_since.
    If the push failed, leave dirty_since in place. The scheduled backup picks it up.
 ```
@@ -774,6 +801,20 @@ type DataShape = {
 ```
 
 - `next` on a routine is an ISO time with offset so the page can count down.
+- **Chats** (`messages.json`, uploaded with `push-messages.sh`, not part of `data.json`):
+  ```ts
+  type MessagesFile = { chats: {
+    id: string;                     // stable: "group:<group id or name>", "dm:<bot agent id>", "dm:main" (your chat with the user)
+    name: string;                   // what the list shows: the group name or the bot's name
+    kind: "group" | "direct";
+    team?: string;                  // the TEAMS id this chat belongs to (puts the team's colour on a group chat)
+    bot?: string;                   // direct chats: the bot's exact name (matches lead/member names and AVATARS)
+    participants?: string[];        // display names
+    messages: { id?: string; at: string /* ISO with offset */; from: string; role: "user" | "bot" | "system"; text: string }[];
+  }[] };
+  ```
+  Messages are merged by `id` (or by chat + time + sender + text when there is no id), so re-sending is safe and a
+  re-sent `id` with new text replaces the old copy. Each chat keeps its newest 3000 messages.
 - `AVATARS` lookup for a bot: exact name, then family name, then any sibling's entry (an entry for "Data Bot - Team" also
   covers "Data Bot - Ryan"). No match = the default team-colour blob. Example:
   `"AVATARS": { "Grok Bot": { "color": "#ffffff", "shape": "circle", "badge": "#299fff" }, "Captain America": { "color": "#ff263c", "shape": "pentagon" } }`.
@@ -791,6 +832,7 @@ type DataShape = {
 | Event timer | one dated one-off, ten minutes after the oldest unflushed change, only when none is already pending and the time is outside quiet hours or days; after the run it deletes itself and `state/flush_timer`. A skipped or failed refresh keeps `state/dirty_since` for the scheduled backup |
 | Client normally | every 60 s and when the tab becomes visible |
 | Session cookie | 60 days; rotating `CONTROL_ACCESS_TOKEN` signs out every device |
+| Chats | newest 3000 messages per chat, 12,000 characters per message; `push-messages.sh` sends batches of at most 400 messages / 1.5 MB; the page loads 300 at a time ("Load older") and checks for new ones every 60 s |
 
 ## 13. Files in `<SRC>/skill/reference/`
 
@@ -799,6 +841,8 @@ type DataShape = {
 | `lib/auth.ts`, `app/[k]/route.ts` | private link → signed httpOnly cookie; everything else 404 (`?next=setup` opens `/setup`) |
 | `lib/admin.ts`, `app/api/admin/data/route.ts` | bot-only data push (`Authorization: Bearer <ADMIN_KEY>`) |
 | `lib/store.ts`, `app/api/data/route.ts` | private Blob read/write, schema check, refresh rate limit, history archive |
+| `app/api/admin/messages/route.ts`, `app/api/chats/route.ts` | chat upload (bot only, `ADMIN_KEY`) and the Chats panel's reads: list, one chat, search (cookie) |
+| `scripts/push-messages.sh` | uploads `messages.json` in batches and redacts the app's own secrets first |
 | `app/api/history/route.ts` | the History panel's archive (past activity lines and requests sent from the page), cookie-protected |
 | `lib/config.ts`, `app/api/send/route.ts` | webhook settings (env first, then the `/setup` value; this skill sets no webhook env vars, so `/setup` is used) and forwarding page commands |
 | `app/setup/*`, `app/api/setup/route.ts` | the page where the user pastes the webhook URL and key (the only way the key gets in) |

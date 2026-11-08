@@ -1,4 +1,5 @@
 import { get, put } from "@vercel/blob";
+import { createHash } from "crypto";
 import seed from "../data.json"; // a small valid DATA file shipped with the app (fallback)
 // Everything lives in a PRIVATE Vercel Blob store. No database needed.
 const DATA_PATH = "control-center/data.json";
@@ -64,4 +65,79 @@ export async function lastRefreshAt() {
 export async function markRefresh(at: number) {
   refreshMem = at;
   try { await writeJson(REFRESH_PATH, { at }); } catch {}
+}
+
+// ---- chat history: the real conversations between the user's team and the bots ----
+// The bot uploads new messages on every full refresh (push-messages.sh -> /api/admin/messages).
+// One private Blob file per chat (newest CHAT_MAX messages) plus an index with a preview of each chat.
+const CHAT_DIR = "control-center/chats/";
+const CHAT_INDEX = CHAT_DIR + "index.json";
+const CHAT_MAX = 3000;
+export type ChatMsg = { id: string; at: string; from: string; role: "user" | "bot" | "system"; text: string };
+export type ChatMeta = { id: string; name: string; kind: "group" | "direct"; team?: string; bot?: string; participants?: string[]; count: number; lastAt: string; lastFrom: string; lastText: string; updatedAt: number };
+export type ChatIn = { id: string; name: string; kind: "group" | "direct"; team?: string; bot?: string; participants?: string[]; messages: ChatMsg[] };
+const chatPath = (id: string) => CHAT_DIR + createHash("sha1").update(id).digest("hex").slice(0, 24) + ".json";
+const str = (v: any, n: number) => (typeof v === "string" ? v.slice(0, n) : "");
+const msgTime = (m: ChatMsg) => { const v = Date.parse(m.at); return isNaN(v) ? 0 : v; };
+// validate and normalise one uploaded chat; returns null when it is unusable
+export function cleanChat(c: any): ChatIn | null {
+  if (!c || typeof c.id !== "string" || !c.id.trim() || typeof c.name !== "string" || !Array.isArray(c.messages)) return null;
+  const messages: ChatMsg[] = c.messages
+    .filter((m: any) => m && typeof m.text === "string" && m.text.trim() && typeof m.at === "string" && !isNaN(Date.parse(m.at)))
+    .map((m: any) => {
+      const from = str(m.from, 120) || "?", text = str(m.text, 12000), at = m.at;
+      const id = typeof m.id === "string" && m.id.trim() ? m.id.slice(0, 160) : createHash("sha1").update(`${c.id}|${at}|${from}|${text.slice(0, 300)}`).digest("hex").slice(0, 20);
+      return { id, at, from, role: m.role === "user" || m.role === "system" ? m.role : "bot", text };
+    });
+  return {
+    id: c.id.slice(0, 200), name: str(c.name, 200) || c.id, kind: c.kind === "group" ? "group" : "direct",
+    team: str(c.team, 120) || undefined, bot: str(c.bot, 120) || undefined,
+    participants: Array.isArray(c.participants) ? c.participants.filter((p: any) => typeof p === "string").slice(0, 30).map((p: string) => p.slice(0, 120)) : undefined,
+    messages,
+  };
+}
+// pure merge: dedupe by id, oldest first, keep the newest CHAT_MAX
+export function mergeMessages(prev: ChatMsg[], add: ChatMsg[]): ChatMsg[] {
+  const byId = new Map<string, ChatMsg>();
+  prev.forEach((m) => byId.set(m.id, m));
+  add.forEach((m) => byId.set(m.id, m)); // a re-sent message replaces the stored copy (edits)
+  return Array.from(byId.values()).sort((a, b) => msgTime(a) - msgTime(b)).slice(-CHAT_MAX);
+}
+export async function readChatIndex(): Promise<ChatMeta[]> {
+  const j = await readJson(CHAT_INDEX);
+  return j && Array.isArray(j.chats) ? j.chats : [];
+}
+export async function readChat(id: string): Promise<ChatMsg[]> {
+  const j = await readJson(chatPath(id));
+  return j && Array.isArray(j.messages) ? j.messages : [];
+}
+export async function appendChats(chats: ChatIn[]): Promise<{ chats: number; added: number }> {
+  const index = await readChatIndex();
+  let added = 0;
+  for (const c of chats) {
+    const prev = await readChat(c.id);
+    const merged = mergeMessages(prev, c.messages);
+    added += Math.max(0, merged.length - prev.length);
+    await writeJson(chatPath(c.id), { id: c.id, messages: merged });
+    const last = merged[merged.length - 1];
+    const meta: ChatMeta = {
+      id: c.id, name: c.name, kind: c.kind, team: c.team, bot: c.bot, participants: c.participants, count: merged.length,
+      lastAt: last ? last.at : "", lastFrom: last ? last.from : "", lastText: last ? last.text.slice(0, 160) : "", updatedAt: Date.now(),
+    };
+    const i = index.findIndex((x) => x.id === c.id);
+    if (i >= 0) index[i] = meta; else index.push(meta);
+  }
+  index.sort((a, b) => (Date.parse(b.lastAt) || 0) - (Date.parse(a.lastAt) || 0));
+  await writeJson(CHAT_INDEX, { chats: index });
+  return { chats: chats.length, added };
+}
+// search every chat (small orgs: dozens of chats); newest hits first
+export async function searchChats(q: string, limit = 60): Promise<{ chat: string; name: string; msg: ChatMsg }[]> {
+  const needle = q.trim().toLowerCase();
+  if (needle.length < 2) return [];
+  const index = await readChatIndex();
+  const all = await Promise.all(index.map(async (c) => ({ c, msgs: await readChat(c.id) })));
+  const hits: { chat: string; name: string; msg: ChatMsg }[] = [];
+  all.forEach(({ c, msgs }) => msgs.forEach((m) => { if ((m.text + " " + m.from).toLowerCase().includes(needle)) hits.push({ chat: c.id, name: c.name, msg: m }); }));
+  return hits.sort((a, b) => msgTime(b.msg) - msgTime(a.msg)).slice(0, limit);
 }

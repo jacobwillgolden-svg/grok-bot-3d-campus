@@ -10,11 +10,11 @@ REF="$SRC/skill/reference"
 mkdir -p "$DST"
 ( cd "$SRC" && tar --exclude=node_modules --exclude=.next --exclude=skill --exclude=screenshots --exclude=.git -cf - . ) | ( cd "$DST" && tar -xf - )
 cd "$DST"
-rm -f app/page.tsx app/api/data/route.ts app/api/send/route.ts lib/demo-data.ts lib/demo-sim.ts components/DemoApp.tsx
+rm -f app/page.tsx app/api/data/route.ts app/api/send/route.ts lib/demo-data.ts lib/demo-sim.ts lib/demo-chats.ts components/DemoApp.tsx
 cp -R "$REF/app/." app/
 cp -R "$REF/lib/." lib/
-cp "$REF/scripts/push-data.sh" "$REF/scripts/make-bundle.sh" .
-chmod +x push-data.sh make-bundle.sh
+cp "$REF/scripts/push-data.sh" "$REF/scripts/push-messages.sh" "$REF/scripts/make-bundle.sh" .
+chmod +x push-data.sh push-messages.sh make-bundle.sh
 printf '%s\n' '{"UPDATED":"","USAGE":{"weeklyPct":0,"reset":"","onDemandPct":0,"period":"","byTeam":[],"topBots":[]},"TEAMS":[]}' > data.json
 # real-app wording in the UI
 sed -i 's/title: "Control Center · Demo", description: "[^"]*"/title: "Control Center", description: "Private"/' app/layout.tsx
