@@ -172,7 +172,7 @@ const TREES = [
 // ---- data refresh: the web app fills RF (instant re-read of the latest data); on the canvas the button just re-reads the clock ----
 type RefreshApi = { busy: boolean; at: number; result: "" | "new" | "same" | "error"; reqAt: number; polling: boolean; refresh: () => void; note?: string };
 // demo only (components/DemoApp.tsx): a client-side simulation of the bot; null in the real app
-type DemoApi = { snapshot: () => DataShape; send: (items: string[]) => void; refreshRound: () => void; subscribe: (fn: () => void) => () => void; chats?: () => any[]; sendChat?: (chat: string, from: string, text: string) => void };
+type DemoApi = { snapshot: () => DataShape; send: (items: string[]) => void; refreshRound: () => void; subscribe: (fn: () => void) => () => void; chats?: () => any[]; sendChat?: (chat: string, from: string, text: string) => void; react?: (chat: string, msg: string, emoji: string, by: string, op: "add" | "remove") => void; createChannel?: (name: string, purpose: string, members: string[], from: string) => string };
 let DEMO: DemoApi | null = null;
 // "3.11.2026, 08:06 (…)" → "08:06" today, or "2.11 08:06" for an older day
 const dataStamp = (u: string) => {
@@ -351,6 +351,7 @@ function QuickCmds(props: { team: Team; owner: Member; isLead: boolean; onSend: 
       <div style={{ fontSize: 13, fontWeight: 700, color: th.text.secondary, marginBottom: 8 }}>Quick commands · go into the bot tray</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
         <Pb label="💬 Chat history" color={th.text.primary} bg={th.bg.elevated} onClick={() => { if (OPEN_CHAT) OPEN_CHAT(owner.name); }} />
+        <Pb label="🖥 Computer" color={th.text.primary} bg={th.bg.elevated} onClick={() => { if (OPEN_MONITOR) OPEN_MONITOR(owner.name); }} />
         <Pb label="❓ Status?" color={th.text.accent} bg={th.bg.elevated} onClick={() => props.onSend(`What's the status? — ${team.name}: ${owner.name}`)} />
         <Pb label={props.isLead ? "📝 Note to the lead" : "📝 Note to the lead about it"} color={th.text.primary} bg={th.bg.elevated} onClick={() => setOpen(!open)} />
         {mine.length > 0 && <Pb label={`⏸ Pause all its tasks (${mine.length})`} color={th.text.warning} bg={th.fill.warningSubtle} onClick={() => props.onSend(`Pause all tasks — ${team.name}: ${owner.name} [${mine.map((r) => r.id).join(", ")}]`)} />}
@@ -2848,8 +2849,120 @@ function sentTeam(text: string): Team | undefined {
 }
 
 // ---- chats: the real conversations between your team and the bots (the main bot uploads them on each full refresh) ----
-type ChatMsg = { id: string; at: string; from: string; role: "user" | "bot" | "system"; text: string };
-type ChatMeta = { id: string; name: string; kind: "group" | "direct"; team?: string; bot?: string; participants?: string[]; count: number; lastAt: string; lastFrom: string; lastText: string };
+type ChatRx = { emoji: string; by: string[] };
+type ChatMsg = { id: string; at: string; from: string; role: "user" | "bot" | "system"; text: string; reactions?: ChatRx[]; rx?: { emoji: string; by: string; op: "add" | "remove"; at: number }[] };
+type ChatMeta = { id: string; name: string; kind: "group" | "direct"; team?: string; bot?: string; participants?: string[]; count: number; lastAt: string; lastFrom: string; lastText: string; channel?: boolean; purpose?: string; pending?: boolean };
+// what to show: Grok's reactions plus the page's own reactions that are still on their way to Grok
+function effReactions(m: ChatMsg): ChatRx[] {
+  const out: ChatRx[] = (m.reactions || []).map((r) => ({ emoji: r.emoji, by: [...r.by] }));
+  (m.rx || []).forEach((o) => {
+    let r = out.find((x) => x.emoji === o.emoji);
+    if (o.op === "add") { if (!r) { r = { emoji: o.emoji, by: [] }; out.push(r); } if (!r.by.includes(o.by)) r.by.push(o.by); }
+    else if (r) r.by = r.by.filter((b) => b !== o.by);
+  });
+  return out.filter((r) => r.by.length);
+}
+const QUICK_RX = ["👍", "❤️", "😂", "🎉", "👀", "✅"];
+// the full emoji picker (every Unicode emoji, search, skin tones, recently used), loaded on first use
+function EmojiPicker(props: { onPick: (e: string) => void; onClose: () => void }) {
+  const host = useRef<any>(null);
+  const pick = useRef(props.onPick); pick.current = props.onPick;
+  const close = useRef(props.onClose); close.current = props.onClose;
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let el: any = null, alive = true;
+    import("emoji-picker-element").then(() => {
+      if (!alive || !host.current) return;
+      el = document.createElement("emoji-picker");
+      el.className = "dark";
+      el.dataSource = "/emoji-data";
+      const css: Record<string, string> = { "--background": "#1e1e1e", "--border-color": "#2c2c2e", "--input-border-color": "#3b3b3d", "--input-font-color": "#ffffff", "--input-placeholder-color": "#9a9a9a", "--indicator-color": "#c22576", "--outline-color": "#c22576", "--button-hover-background": "#2c2c2e", "--button-active-background": "#3a1a2c", "--category-font-color": "#9a9a9a", "--num-columns": "8" };
+      Object.keys(css).forEach((k) => el.style.setProperty(k, css[k]));
+      el.style.width = "min(340px, calc(100vw - 40px))"; el.style.height = "360px";
+      el.addEventListener("emoji-click", (ev: any) => { const u = ev.detail && ev.detail.unicode; if (u) pick.current(u); });
+      host.current.appendChild(el); setReady(true);
+      setTimeout(() => { try { const i = el.shadowRoot && el.shadowRoot.querySelector("input"); if (i) i.focus(); } catch (e) {} }, 80);
+    });
+    const onDown = (ev: any) => { if (host.current && !host.current.contains(ev.target)) close.current(); };
+    const onKey = (ev: any) => { if (ev.key === "Escape") { ev.stopPropagation(); close.current(); } };
+    const h = host.current;
+    document.addEventListener("mousedown", onDown, true);
+    if (h) h.addEventListener("keydown", onKey);
+    return () => { alive = false; document.removeEventListener("mousedown", onDown, true); if (h) h.removeEventListener("keydown", onKey); if (el && el.parentNode) el.parentNode.removeChild(el); };
+  }, []);
+  return <div ref={host} style={{ borderRadius: 14, overflow: "hidden", boxShadow: "0 14px 44px rgba(0,0,0,.6)", border: "1px solid #3b3b3d", background: "#1e1e1e" }}>{!ready && <div style={{ padding: 18, color: "#9a9a9a", fontSize: 13 }}>Loading emoji…</div>}</div>;
+}
+
+// ---- monitor: watch a bot's computer (the link behind the small monitor button in Grok) ----
+type DeskLink = { name: string; url: string };
+let DESK: DeskLink[] = [];
+let OPEN_MONITOR: ((who?: string | null) => void) | null = null;
+const deskFor = (name: string) => DESK.find((l) => l.name.toLowerCase() === name.trim().toLowerCase()) || DESK.find((l) => familyOf(l.name) === familyOf(name));
+function MonitorPanel(props: { open: boolean; who: string | null; links: DeskLink[]; onSave: (links: DeskLink[]) => Promise<string | null>; onClose: () => void; phone: boolean }) {
+  const th = useGrokTheme();
+  const [tab, setTab] = useState(0);
+  const [edit, setEdit] = useState(false);
+  const [rows, setRows] = useState<DeskLink[]>([]);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!props.open) return;
+    setErr("");
+    const w = props.who;
+    const i = w ? props.links.findIndex((l) => l.name.toLowerCase() === w.toLowerCase() || familyOf(l.name) === familyOf(w)) : 0;
+    if (!props.links.length || (w && i < 0)) { setRows([...props.links, { name: w || "Grok Bot", url: "" }]); setEdit(true); }
+    else { setTab(Math.max(0, i)); setEdit(false); }
+  }, [props.open, props.who]);
+  const cur = props.links[Math.min(tab, props.links.length - 1)];
+  const save = async () => {
+    const clean = rows.map((r) => ({ name: r.name.trim() || "Grok Bot", url: r.url.trim() })).filter((r) => r.url);
+    if (clean.some((r) => !/^https:\/\/\S+$/i.test(r.url))) { setErr("Each link must start with https://"); return; }
+    setBusy(true); const e = await props.onSave(clean); setBusy(false);
+    if (e) { setErr(e); return; }
+    setEdit(false); setTab(0);
+  };
+  const btn: any = { font: "inherit", fontSize: 13, fontWeight: 600, padding: "6px 12px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap" };
+  const inp: any = { font: "inherit", fontSize: 14, padding: "8px 10px", borderRadius: 10, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none", minWidth: 0 };
+  return (
+    <div role="dialog" aria-label="Computer" aria-hidden={!props.open} style={{ position: "absolute", top: props.phone ? 8 : 64, bottom: props.phone ? 8 : 14, left: "50%", transform: `translateX(-50%) scale(${props.open ? 1 : 0.98})`, width: props.phone ? "calc(100% - 16px)" : "min(1180px, calc(100% - 28px))", zIndex: 12, display: "flex", flexDirection: "column", background: th.bg.elevated, border: `1px solid ${th.border.strong}`, borderRadius: 20, boxShadow: "0 18px 50px rgba(0,0,0,.55)", overflow: "hidden", opacity: props.open ? 1 : 0, pointerEvents: props.open ? "auto" : "none", visibility: props.open ? "visible" : "hidden", transition: "opacity 200ms, transform 200ms, visibility 200ms" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: `1px solid ${th.border.weak}`, flexWrap: "wrap" }}>
+        <b style={{ fontSize: 16, marginInlineEnd: 4 }}>🖥 Computer</b>
+        {!edit && props.links.map((l, i) => <button key={l.name + i} onClick={() => setTab(i)} style={{ ...btn, border: "none", background: i === tab ? th.border.strong : "transparent", color: i === tab ? th.text.primary : th.text.secondary }}>{l.name}</button>)}
+        <span style={{ marginInlineStart: "auto", display: "flex", gap: 6 }}>
+          {!edit && cur && <a href={cur.url} target="_blank" rel="noopener noreferrer" style={btn}>↗ Open in new window</a>}
+          {!edit && <button onClick={() => { setRows(props.links.length ? props.links : [{ name: "Grok Bot", url: "" }]); setEdit(true); setErr(""); }} style={btn}>✎ Links</button>}
+          <button onClick={props.onClose} aria-label="Close" title="Close (Esc)" style={{ width: 32, height: 32, borderRadius: 16, border: "none", background: th.fill.secondary, color: th.text.primary, cursor: "pointer", font: "inherit", fontSize: 15 }}>✕</button>
+        </span>
+      </div>
+      {edit || !cur ? (
+        <div style={{ flex: "1 1 auto", overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 12, maxWidth: 720 }}>
+          <b style={{ fontSize: 17 }}>Watch your bots' computers here</b>
+          <span style={{ fontSize: 14, color: th.text.secondary, lineHeight: "21px" }}>In Grok, click the small <b>monitor</b> button next to a bot, copy the address of the view that opens, and paste it below. Everyone who has this page can then watch that computer, so only add links you are happy to share with the team.</span>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input value={r.name} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="Name (e.g. Grok Bot)" style={{ ...inp, flex: "0 1 180px" }} />
+              <input value={r.url} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, url: e.target.value } : x))} placeholder="https://… (the monitor link from Grok)" style={{ ...inp, flex: "1 1 300px" }} />
+              <button onClick={() => setRows(rows.filter((_, j) => j !== i))} aria-label="Remove" style={btn}>Remove</button>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setRows([...rows, { name: "", url: "" }])} style={btn}>+ Add a computer</button>
+            <button onClick={save} disabled={busy} style={{ ...btn, border: "none", background: th.fill.accent, color: th.text.onColor }}>{busy ? "Saving…" : "Save"}</button>
+            {props.links.length > 0 && <button onClick={() => { setEdit(false); setErr(""); }} style={btn}>Cancel</button>}
+          </div>
+          {err && <span style={{ color: th.text.danger, fontSize: 13.5 }}>{err}</span>}
+        </div>
+      ) : (
+        <>
+          <div style={{ flex: "1 1 auto", minHeight: 0, background: "#000" }}>
+            {props.open && <iframe key={cur.url} src={cur.url} title={"Computer of " + cur.name} allow="fullscreen; clipboard-read; clipboard-write" referrerPolicy="no-referrer" style={{ border: 0, width: "100%", height: "100%", display: "block" }} />}
+          </div>
+          <div style={{ padding: "7px 12px", fontSize: 12, color: th.text.tertiary, borderTop: `1px solid ${th.border.weak}` }}>Blank or asking you to sign in? Grok may not allow showing it inside another page. Use ↗ Open in new window.</div>
+        </>
+      )}
+    </div>
+  );
+}
 type ChatHit = { chat: string; name: string; msg: ChatMsg };
 let OPEN_CHAT: ((who?: string) => void) | null = null;
 const CHAT_PAGE = 300;
@@ -2861,14 +2974,14 @@ async function chatGet(qs: string): Promise<any> {
   return r.json();
 }
 async function loadChatIndex(): Promise<ChatMeta[]> {
-  if (DEMO) return demoChatList().map((c: any) => { const l = c.messages[c.messages.length - 1]; return { id: c.id, name: c.name, kind: c.kind, team: c.team, bot: c.bot, participants: c.participants, count: c.messages.length, lastAt: l ? l.at : "", lastFrom: l ? l.from : "", lastText: l ? l.text.slice(0, 160) : "" }; }).sort((a: ChatMeta, b: ChatMeta) => atMs(b.lastAt) - atMs(a.lastAt));
+  if (DEMO) return demoChatList().map((c: any) => { const l = c.messages[c.messages.length - 1]; return { id: c.id, name: c.name, kind: c.kind, team: c.team, bot: c.bot, participants: c.participants, channel: c.channel, purpose: c.purpose, pending: c.pending, count: c.messages.length, lastAt: l ? l.at : "", lastFrom: l ? l.from : "", lastText: l ? l.text.slice(0, 160) : "" }; }).sort((a: ChatMeta, b: ChatMeta) => atMs(b.lastAt) - atMs(a.lastAt));
   const j = await chatGet(""); return Array.isArray(j.chats) ? j.chats : [];
 }
 async function loadChatMsgs(id: string, before?: string, limit = CHAT_PAGE): Promise<{ messages: ChatMsg[]; more: boolean }> {
   if (DEMO) {
     const c = demoChatList().find((x: any) => x.id === id); const all: ChatMsg[] = c ? c.messages : [];
     const upto = before ? all.filter((m) => atMs(m.at) < atMs(before)) : all;
-    return { messages: upto.slice(-limit), more: upto.length > limit };
+    return { messages: upto.slice(-limit).map((m) => ({ ...m, reactions: m.reactions ? m.reactions.map((r) => ({ emoji: r.emoji, by: [...r.by] })) : undefined })), more: upto.length > limit };
   }
   const j = await chatGet(`id=${encodeURIComponent(id)}&limit=${limit}${before ? "&before=" + encodeURIComponent(before) : ""}`);
   return { messages: Array.isArray(j.messages) ? j.messages : [], more: !!j.more };
@@ -2931,12 +3044,28 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
   const [hits, setHits] = useState<ChatHit[] | null>(null);
   const [hl, setHl] = useState<string | null>(null);
   const [wide, setWide] = useState<Record<string, boolean>>({});
-  const [seen, setSeen] = useState<Record<string, string> | null>(null);
+  const [seen, setSeen] = useState<Record<string, { at: string; n: number }> | null>(null);
+  // a new channel (created in Grok by the main bot)
+  const [making, setMaking] = useState(false);
+  const [chName, setChName] = useState("");
+  const [chPurpose, setChPurpose] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [chErr, setChErr] = useState("");
+  const [chBusy, setChBusy] = useState(false);
+  // reactions and the emoji picker
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [pick, setPick] = useState<null | { kind: "react"; msg: string } | { kind: "compose" }>(null);
   // composer: the sender's name is asked once per browser (the bots and the team see it)
   const [me, setMe] = useState("");
   const [meDraft, setMeDraft] = useState("");
   const [askMe, setAskMe] = useState(false);
-  const [draft, setDraft] = useState("");
+  // one draft per chat, kept in this browser, so a half-typed message never moves to another chat
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  useEffect(() => { try { const v = JSON.parse(localStorage.getItem("ccDrafts") || "{}"); if (v && typeof v === "object") setDrafts(v); } catch (e) {} }, []);
+  const putDraft = (id: string, v: string) => setDrafts((d) => { const n = { ...d, [id]: v }; if (!v) delete n[id]; try { localStorage.setItem("ccDrafts", JSON.stringify(n)); } catch (e) {} return n; });
+  const draft = (sel && drafts[sel]) || "";
+  const setDraft = (v: string) => { if (sel) putDraft(sel, v); };
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState("");
   const [fast, setFast] = useState(0); // poll every few seconds until this time (waiting for a reply)
@@ -2956,20 +3085,27 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
   // unread = newer than what this browser last opened; the very first visit marks everything as read
   useEffect(() => {
     if (!chats) return;
-    let s: Record<string, string> | null = null;
-    try { const v = JSON.parse(localStorage.getItem("ccChatSeen") || "null"); if (v && typeof v === "object") s = v; } catch (e) {}
-    if (!s) { s = {}; chats.forEach((c) => { s![c.id] = c.lastAt; }); try { localStorage.setItem("ccChatSeen", JSON.stringify(s)); } catch (e) {} }
+    let s: Record<string, { at: string; n: number }> | null = null;
+    try {
+      const v = JSON.parse(localStorage.getItem("ccChatSeen") || "null");
+      if (v && typeof v === "object") {
+        s = {};
+        Object.keys(v).forEach((k) => { const x = v[k], c = chats.find((y) => y.id === k); s![k] = typeof x === "string" ? { at: x, n: c ? (x === c.lastAt ? c.count : Math.max(0, c.count - 1)) : 0 } : x; });
+      }
+    } catch (e) {}
+    if (!s) { s = {}; chats.forEach((c) => { s![c.id] = { at: c.lastAt, n: c.count }; }); try { localStorage.setItem("ccChatSeen", JSON.stringify(s)); } catch (e) {} }
     setSeen(s);
   }, [chats === null]);
   const viewing = props.open && props.visible ? sel : null;
-  const unread = (c: ChatMeta) => !!seen && c.id !== viewing && atMs(c.lastAt) > atMs(seen[c.id] || "");
+  const unreadOf = (c: ChatMeta) => { if (!seen || c.id === viewing) return 0; const x = seen[c.id]; if (!x) return c.count; return atMs(c.lastAt) > atMs(x.at) ? Math.max(1, c.count - x.n) : 0; };
+  const unread = (c: ChatMeta) => unreadOf(c) > 0;
   const unreadN = chats ? chats.filter(unread).length : 0;
   useEffect(() => { props.onUnread(unreadN); }, [unreadN]);
-  const markSeen = (c: ChatMeta | undefined) => { if (!c) return; setSeen((s) => { const n = { ...(s || {}), [c.id]: c.lastAt }; try { localStorage.setItem("ccChatSeen", JSON.stringify(n)); } catch (e) {} return n; }); };
+  const markSeen = (c: ChatMeta | undefined) => { if (!c) return; setSeen((s) => { const n = { ...(s || {}), [c.id]: { at: c.lastAt, n: c.count } }; try { localStorage.setItem("ccChatSeen", JSON.stringify(n)); } catch (e) {} return n; }); };
   useEffect(() => { if (viewing && chats) markSeen(chats.find((c) => c.id === viewing)); }, [viewing, chats]);
 
   const openChat = async (id: string, hlId?: string) => {
-    const n = ++reqN.current;
+    const n = ++reqN.current; setMaking(false); setPick(null); setActiveId(null);
     setSel(id); setHl(hlId || null); setMsgs([]); setMore(false); setBusy(true); setWide({}); stick.current = !hlId;
     try { const r = await loadChatMsgs(id, undefined, hlId ? 1000 : CHAT_PAGE); if (n === reqN.current) { setMsgs(r.messages); setMore(r.more); } } catch (e) {}
     if (n === reqN.current) setBusy(false);
@@ -3016,11 +3152,47 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
         if (!r.ok || !j.ok) throw new Error(j.error || "Error " + r.status);
         if (j.message) setMsgs((m) => mergeMsgs(m, [j.message]));
       }
-      setDraft(""); if (ta.current) ta.current.style.height = "";
+      putDraft(c.id, ""); if (ta.current) ta.current.style.height = "";
       stick.current = true; sentAt.current = Date.now() - 1000; setFast(Date.now() + 3 * 60000);
       const r2 = await loadChatMsgs(c.id); setMsgs((m) => mergeMsgs(m, r2.messages)); refresh();
     } catch (e: any) { setSendErr((e && e.message) || "Couldn't send"); }
     setSending(false);
+  };
+  const react = async (m: ChatMsg, emoji: string) => {
+    const c = chats && sel ? chats.find((x) => x.id === sel) : undefined;
+    if (!c) return;
+    if (!me) { setAskMe(true); setSendErr("Add your name first, then react."); return; }
+    const op: "add" | "remove" = effReactions(m).some((r) => r.emoji === emoji && r.by.includes(me)) ? "remove" : "add";
+    const apply = (list: ChatMsg[], o: any) => list.map((x) => x.id === m.id ? { ...x, rx: [...(x.rx || []).filter((y) => !(y.emoji === emoji && y.by === me)), ...(o ? [o] : [])] } : x);
+    setMsgs((list) => apply(list, { emoji, by: me, op, at: Date.now() })); setActiveId(null);
+    try {
+      if (DEMO) { const d: any = DEMO; if (d.react) d.react(c.id, m.id, emoji, me, op); }
+      else {
+        const r = await fetch("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "react", chat: c.id, msg: m.id, emoji, op, from: me }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || "Error " + r.status);
+      }
+    } catch (e: any) { setMsgs((list) => apply(list, null)); setSendErr("Reaction not sent: " + ((e && e.message) || "error")); }
+  };
+  const chSlug = chName.trim().toLowerCase().replace(/^#/, "").replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "").slice(0, 40);
+  const createCh = async () => {
+    if (chSlug.length < 2 || !picked.length || chBusy) return;
+    if (!me) { setChErr("Add your name first (top of this form)."); return; }
+    setChBusy(true); setChErr("");
+    try {
+      let id = "";
+      if (DEMO) { const d: any = DEMO; id = d.createChannel ? d.createChannel(chSlug, chPurpose.trim(), picked, me) : ""; }
+      else {
+        const r = await fetch("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "channel", name: chSlug, purpose: chPurpose.trim(), members: picked, from: me }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || "Error " + r.status);
+        id = j.id;
+      }
+      await refresh();
+      setMaking(false); setChName(""); setChPurpose(""); setPicked([]);
+      if (id) { openChat(id); sentAt.current = Date.now() - 1000; setFast(Date.now() + 3 * 60000); }
+    } catch (e: any) { setChErr((e && e.message) || "Couldn't create the channel"); }
+    setChBusy(false);
   };
   // first open on a wide screen: show the most recent chat
   useEffect(() => { if (props.open && props.visible && !sel && !props.phone && chats && chats.length && !props.focus) openChat(chats[0].id); }, [props.open, props.visible, chats]);
@@ -3055,8 +3227,54 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
   const ql = q.trim().toLowerCase();
   const list = (chats || []).filter((c) => !ql || (c.name + " " + (c.participants || []).join(" ") + " " + (c.bot || "")).toLowerCase().includes(ql));
   const twoPane = !props.phone;
-  const showList = twoPane || !sel;
-  const showConv = twoPane || !!sel;
+  const showList = twoPane || (!sel && !making);
+  const showConv = twoPane || !!sel || making;
+  const allBots = TEAMS.flatMap((tm) => [tm.lead, ...tm.members].map((m) => ({ name: m.name, team: tm })));
+  const meRow = (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 13, color: th.text.secondary }}>Your name (the bots and your team see it):</span>
+      <input value={meDraft} onChange={(e) => setMeDraft(e.target.value)} onKeyDown={(e: any) => { if (e.key === "Enter") saveMe(); }} placeholder="e.g. Jacob" style={{ flex: "1 1 120px", minWidth: 0, font: "inherit", fontSize: 14, padding: "6px 10px", borderRadius: 10, border: `1px solid ${askMe ? th.fill.accent : th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none" }} />
+      <button onClick={saveMe} disabled={!meDraft.trim()} style={{ font: "inherit", fontSize: 13, fontWeight: 700, padding: "6px 12px", borderRadius: 999, border: "none", background: meDraft.trim() ? th.fill.accent : th.fill.secondary, color: th.text.onColor, cursor: meDraft.trim() ? "pointer" : "default" }}>Save</button>
+    </div>
+  );
+  const newChannelForm = (
+    <div style={{ flex: "1 1 auto", overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {props.phone && <button onClick={() => setMaking(false)} aria-label="Back to chats" style={{ width: 32, height: 32, borderRadius: 16, border: "none", background: th.fill.secondary, color: th.text.primary, cursor: "pointer", font: "inherit", fontSize: 18 }}>‹</button>}
+        <b style={{ fontSize: 18 }}>New channel</b>
+      </div>
+      <span style={{ fontSize: 13.5, color: th.text.secondary, lineHeight: "20px" }}>Your Grok Bot creates this group in Grok with the bots you pick, joins it, and keeps it in sync here. A Grok group holds 6 members: your Grok Bot plus up to 5 bots.</span>
+      {!me && meRow}
+      <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 13, color: th.text.secondary }}>Name
+        <span style={{ display: "flex", alignItems: "center", gap: 6, background: th.bg.base, border: `1px solid ${th.border.default}`, borderRadius: 10, padding: "0 10px" }}>
+          <b style={{ fontSize: 17, color: th.text.tertiary }}>#</b>
+          <input value={chName} onChange={(e) => setChName(e.target.value)} placeholder="e.g. launch-week" style={{ flex: 1, minWidth: 0, font: "inherit", fontSize: 14.5, padding: "8px 0", border: "none", background: "none", color: th.text.primary, outline: "none" }} />
+        </span>
+        {chName && chSlug !== chName.trim() && <span style={{ fontSize: 12, color: th.text.tertiary }}>Will be #{chSlug || "…"}</span>}
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 13, color: th.text.secondary }}>What's it for? (optional)
+        <input value={chPurpose} onChange={(e) => setChPurpose(e.target.value)} placeholder="e.g. Everything about next week's launch" style={{ font: "inherit", fontSize: 14, padding: "8px 10px", borderRadius: 10, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none" }} />
+      </label>
+      <div style={{ fontSize: 13, color: th.text.secondary }}>Bots <b style={{ color: picked.length >= 5 ? th.text.warning : th.text.primary }}>{picked.length}/5</b></div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 6 }}>
+        {allBots.map((b) => {
+          const on = picked.includes(b.name), full = !on && picked.length >= 5;
+          return (
+            <button key={b.team.id + b.name} disabled={full} onClick={() => setPicked(on ? picked.filter((x) => x !== b.name) : [...picked, b.name])} style={{ display: "flex", alignItems: "center", gap: 8, textAlign: "start", font: "inherit", padding: "5px 8px", borderRadius: 10, cursor: full ? "default" : "pointer", opacity: full ? 0.45 : 1, border: `1px solid ${on ? th.fill.accent : th.border.subtle}`, background: on ? th.fill.accentSubtle : th.bg.base, color: th.text.primary }}>
+              <BotFace name={b.name} idxOf={props.idxOf} size={24} />
+              <span style={{ minWidth: 0 }}><b style={{ display: "block", fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name}</b><span style={{ fontSize: 11.5, color: th.text.tertiary }}>{b.team.name}</span></span>
+              {on && <span style={{ marginInlineStart: "auto", color: th.text.accent }}>✓</span>}
+            </button>
+          );
+        })}
+      </div>
+      {chErr && <span style={{ color: th.text.danger, fontSize: 13.5 }}>{chErr}</span>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={createCh} disabled={chSlug.length < 2 || !picked.length || chBusy} style={{ font: "inherit", fontSize: 14, fontWeight: 700, padding: "9px 16px", borderRadius: 999, border: "none", background: chSlug.length >= 2 && picked.length && !chBusy ? th.fill.accent : th.fill.secondary, color: chSlug.length >= 2 && picked.length && !chBusy ? th.text.onColor : th.text.tertiary, cursor: "pointer" }}>{chBusy ? "Creating…" : `Create #${chSlug || "channel"}`}</button>
+        <button onClick={() => setMaking(false)} style={{ font: "inherit", fontSize: 14, padding: "9px 16px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, cursor: "pointer" }}>Cancel</button>
+      </div>
+    </div>
+  );
   const faceOf = (c: ChatMeta, sz?: number) => c.kind === "group" ? <GroupFace chat={c} idxOf={props.idxOf} size={sz} /> : <BotFace name={c.bot || c.name} idxOf={props.idxOf} size={sz} />;
   const nameCol = (name: string) => { const a = avatarFor(name); if (a) return a.color === "#ffffff" ? th.text.primary : a.color; const s = seatOf(name, props.idxOf); return s.team ? cats[s.ci % cats.length] : th.text.secondary; };
   const mark = (text: string) => {
@@ -3083,23 +3301,47 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
                 <b style={{ color: th.text.primary }}>No chats yet.</b><br />Your Grok Bot copies the team's chats here on its next full refresh. Press ⟳ in the top bar to ask for one now.
               </div>
             )}
-            {hits !== null && list.length > 0 && <div style={sec}>Chats</div>}
-            {list.map((c) => {
-              const on = c.id === sel, un = unread(c);
+            {(["group", "direct"] as const).map((k) => {
+              const part = list.filter((c) => c.kind === k);
+              const rows = k === "group" ? [...part].sort((a, b) => a.name.localeCompare(b.name)) : part;
+              if (!rows.length && (k === "direct" || ql)) return null;
               return (
-                <button key={c.id} onClick={() => openChat(c.id)} style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", textAlign: "start", font: "inherit", color: th.text.primary, cursor: "pointer", padding: "9px 12px", border: "none", borderBottom: `1px solid ${th.border.weak}`, background: on ? th.fill.accentSubtle : "none" }}>
-                  {faceOf(c)}
-                  <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                      <b style={{ fontSize: 14.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mark(c.name)}</b>
-                      <span style={{ marginInlineStart: "auto", fontSize: 12, color: un ? th.text.accent : th.text.tertiary, whiteSpace: "nowrap", fontWeight: un ? 700 : 400 }}>{c.lastAt ? chatStamp(c.lastAt, now) : ""}</span>
-                    </span>
-                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: un ? th.text.primary : th.text.secondary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.lastFrom ? `${c.lastFrom}: ` : ""}{c.lastText}</span>
-                      {un && <span style={{ width: 9, height: 9, borderRadius: 5, background: th.fill.accent, flex: "none" }} />}
-                    </span>
-                  </span>
-                </button>
+                <div key={k} style={{ paddingBottom: 6 }}>
+                  <div style={{ ...sec, display: "flex", alignItems: "center" }}>
+                    {k === "group" ? "Channels" : "Direct messages"}
+                    {k === "group" && <button onClick={() => { setMaking(true); setSel(null); setChErr(""); }} title="New channel" aria-label="New channel" style={{ marginInlineStart: "auto", width: 24, height: 24, borderRadius: 7, border: "none", background: th.fill.secondary, color: th.text.primary, cursor: "pointer", font: "inherit", fontSize: 16, lineHeight: "22px", padding: 0 }}>+</button>}
+                  </div>
+                  {rows.map((c) => {
+                    const on = c.id === sel, n = unreadOf(c), un = n > 0;
+                    const badge = un ? <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: th.fill.accent, color: th.text.onColor, fontSize: 11, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flex: "none" }}>{n > 99 ? "99+" : n}</span> : null;
+                    if (k === "group") {
+                      const tm = TEAMS.find((x) => x.id === c.team || x.name.toLowerCase() === c.name.toLowerCase());
+                      return (
+                        <button key={c.id} onClick={() => openChat(c.id)} style={{ display: "flex", alignItems: "center", gap: 8, width: "calc(100% - 12px)", margin: "0 6px", textAlign: "start", font: "inherit", cursor: "pointer", padding: "7px 8px", border: "none", borderRadius: 8, background: on ? th.fill.accentSubtle : "none", color: un || on ? th.text.primary : th.text.secondary }}>
+                          <span style={{ fontSize: 17, fontWeight: 700, width: 16, textAlign: "center", flex: "none", color: tm ? cats[(props.idxOf[tm.id] || 0) % cats.length] : th.text.tertiary }}>#</span>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 14.5, fontWeight: un ? 800 : 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mark(c.name)}</span>
+                          {c.pending && <span style={{ fontSize: 11, color: th.text.warning, whiteSpace: "nowrap" }}>setting up…</span>}
+                          {badge}
+                        </button>
+                      );
+                    }
+                    return (
+                      <button key={c.id} onClick={() => openChat(c.id)} style={{ display: "flex", gap: 10, alignItems: "center", width: "calc(100% - 12px)", margin: "0 6px", textAlign: "start", font: "inherit", color: th.text.primary, cursor: "pointer", padding: "7px 8px", border: "none", borderRadius: 8, background: on ? th.fill.accentSubtle : "none" }}>
+                        {faceOf(c, 28)}
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                            <b style={{ fontSize: 14.5, fontWeight: un ? 800 : 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mark(c.name)}</b>
+                            <span style={{ marginInlineStart: "auto", fontSize: 12, color: un ? th.text.accent : th.text.tertiary, whiteSpace: "nowrap", fontWeight: un ? 700 : 400 }}>{c.lastAt ? chatStamp(c.lastAt, now) : ""}</span>
+                          </span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: un ? th.text.primary : th.text.secondary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.lastFrom ? `${c.lastFrom}: ` : ""}{c.lastText}</span>
+                            {badge}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               );
             })}
             {hits !== null && (
@@ -3118,18 +3360,20 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
         </div>
       )}
       {showConv && (
-        <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          {!meta ? (
+        <div style={{ position: "relative", flex: "1 1 auto", minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          {making ? newChannelForm : !meta ? (
             <div style={{ margin: "auto", color: th.text.tertiary, fontSize: 14 }}>{chats && chats.length ? "Pick a chat" : ""}</div>
           ) : (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderBottom: `1px solid ${th.border.weak}` }}>
                 {props.phone && <button onClick={() => setSel(null)} aria-label="Back to chats" style={{ width: 32, height: 32, borderRadius: 16, border: "none", background: th.fill.secondary, color: th.text.primary, cursor: "pointer", font: "inherit", fontSize: 18, flex: "none" }}>‹</button>}
-                {faceOf(meta, 34)}
-                <span style={{ minWidth: 0 }}>
-                  <b style={{ display: "block", fontSize: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta.name}</b>
-                  <span style={{ display: "block", fontSize: 12.5, color: th.text.tertiary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta.kind === "group" ? `Group · ${(meta.participants || []).join(", ")}` : `Direct chat${meta.participants && meta.participants.length ? " · " + meta.participants.join(", ") : ""}`} · {meta.count} messages</span>
+                {meta.kind === "group" ? <span style={{ fontSize: 24, fontWeight: 700, color: th.text.tertiary, width: 26, textAlign: "center", flex: "none" }}>#</span> : faceOf(meta, 34)}
+                <span style={{ minWidth: 0, flex: 1 }}>
+                  <b style={{ display: "block", fontSize: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta.name}{meta.pending && <span style={{ fontSize: 12, fontWeight: 600, color: th.text.warning }}> · setting up in Grok…</span>}</b>
+                  <span style={{ display: "block", fontSize: 12.5, color: th.text.tertiary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta.kind === "group" ? `${meta.purpose ? meta.purpose + " · " : ""}${(meta.participants || []).join(", ")}` : `Direct chat${meta.participants && meta.participants.length ? " · " + meta.participants.join(", ") : ""}`} · {meta.count} {meta.count === 1 ? "message" : "messages"}</span>
                 </span>
+                {meta.kind === "group" && !props.phone && <span style={{ display: "flex", flex: "none" }}>{(meta.participants || []).filter((p) => seatOf(p, props.idxOf).team).slice(0, 6).map((p, i) => <span key={p} title={p} style={{ marginInlineStart: i ? -8 : 0 }}><BotFace name={p} idxOf={props.idxOf} size={24} /></span>)}</span>}
+                {meta.kind === "direct" && <button onClick={() => { if (OPEN_MONITOR) OPEN_MONITOR(meta.bot || meta.name); }} title={`Watch ${meta.bot || meta.name}'s computer`} style={{ flex: "none", font: "inherit", fontSize: 13, fontWeight: 600, padding: "6px 10px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, cursor: "pointer", whiteSpace: "nowrap" }}>🖥{props.phone ? "" : " Computer"}</button>}
               </div>
               <div ref={box} onScroll={() => { const b = box.current; if (b) stick.current = b.scrollHeight - b.scrollTop - b.clientHeight < 80; }} style={{ flex: "1 1 auto", overflowY: "auto", padding: "6px 14px 14px" }}>
                 {more && <div style={{ textAlign: "center", padding: "8px 0" }}><button onClick={older} style={{ font: "inherit", fontSize: 13, fontWeight: 600, padding: "6px 14px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, cursor: "pointer" }}>Load older messages</button></div>}
@@ -3149,14 +3393,25 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
                       {sys ? (
                         <div style={{ textAlign: "center", fontSize: 12.5, color: th.text.tertiary, margin: "6px 0" }}>{m.text}</div>
                       ) : (
-                        <div data-hl={isHl ? "1" : undefined} style={{ display: "flex", flexDirection: mine ? "row-reverse" : "row", gap: 8, alignItems: "flex-end", marginTop: cont ? 3 : 12 }}>
+                        <div data-hl={isHl ? "1" : undefined} onMouseEnter={() => setHoverId(m.id)} onMouseLeave={() => setHoverId((h) => (h === m.id ? null : h))} style={{ display: "flex", flexDirection: mine ? "row-reverse" : "row", gap: 8, alignItems: "flex-end", marginTop: cont ? 3 : 12 }}>
                           <span style={{ width: 30, flex: "none" }}>{!cont && (mine ? <PersonFace name={m.from} /> : <BotFace name={m.from} idxOf={props.idxOf} />)}</span>
-                          <span style={{ maxWidth: "80%", minWidth: 0, display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start" }}>
+                          <span onClick={() => setActiveId(activeId === m.id ? null : m.id)} style={{ position: "relative", maxWidth: "80%", minWidth: 0, display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start" }}>
+                            {(hoverId === m.id || activeId === m.id) && !m.id.endsWith("-created") && (
+                              <span onClick={(ev) => ev.stopPropagation()} style={{ position: "absolute", top: -16, [mine ? "left" : "right"]: 0, zIndex: 3, display: "flex", gap: 1, padding: 3, borderRadius: 12, background: th.bg.elevated, border: `1px solid ${th.border.strong}`, boxShadow: "0 6px 18px rgba(0,0,0,.45)" } as any}>
+                                {QUICK_RX.map((e) => <button key={e} onClick={() => react(m, e)} title={`React ${e}`} style={{ fontSize: 16, width: 30, height: 28, border: "none", background: "none", cursor: "pointer", borderRadius: 8, padding: 0 }}>{e}</button>)}
+                                <button onClick={() => setPick({ kind: "react", msg: m.id })} title="More emoji" style={{ fontSize: 13, height: 28, border: "none", background: "none", color: th.text.secondary, cursor: "pointer", borderRadius: 8, padding: "0 6px" }}>☺＋</button>
+                              </span>
+                            )}
                             {!cont && <span style={{ fontSize: 12, marginBottom: 3, display: "flex", gap: 6, flexDirection: mine ? "row-reverse" : "row" }}><b style={{ color: mine ? th.text.secondary : nameCol(m.from) }}>{m.from}</b><span dir="ltr" style={{ color: th.text.tertiary }}>{hhmm(w)}</span></span>}
                             <span style={{ display: "block", background: mine ? th.fill.accentSubtle : th.bg.base, border: `1px solid ${isHl ? th.fill.accent : mine ? "transparent" : th.border.subtle}`, borderRadius: mine ? "16px 16px 4px 16px" : "16px 16px 16px 4px", padding: "8px 12px", fontSize: 14.5, lineHeight: "21px", whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: th.text.primary }}>
                               {isHl ? mark(m.text) : long && !expanded ? m.text.slice(0, 1400) + "…" : m.text}
                               {long && !isHl && <button onClick={() => setWide({ ...wide, [m.id]: !expanded })} style={{ display: "block", marginTop: 4, font: "inherit", fontSize: 12.5, fontWeight: 700, padding: 0, border: "none", background: "none", color: th.text.accent, cursor: "pointer" }}>{expanded ? "Show less" : "Show more"}</button>}
                             </span>
+                            {(() => { const rs = effReactions(m); return rs.length ? (
+                              <span style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4, justifyContent: mine ? "flex-end" : "flex-start" }}>
+                                {rs.map((r) => { const my = !!me && r.by.includes(me); return <button key={r.emoji} onClick={(ev) => { ev.stopPropagation(); react(m, r.emoji); }} title={r.by.join(", ")} style={{ display: "inline-flex", alignItems: "center", gap: 4, font: "inherit", fontSize: 12.5, fontWeight: 700, padding: "1px 8px", borderRadius: 999, cursor: "pointer", border: `1px solid ${my ? th.fill.accent : th.border.default}`, background: my ? th.fill.accentSubtle : th.bg.base, color: my ? th.text.accent : th.text.secondary }}><span style={{ fontSize: 15 }}>{r.emoji}</span>{r.by.length}</button>; })}
+                              </span>
+                            ) : null; })()}
                             {m.id.startsWith("cc-") && <span style={{ fontSize: 11, color: th.text.tertiary, marginTop: 2 }}>sent from the control center</span>}
                           </span>
                         </div>
@@ -3166,18 +3421,24 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
                 })}
               </div>
               <div style={{ padding: "8px 12px 10px", borderTop: `1px solid ${th.border.weak}` }}>
-                {(askMe || !me) && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 13, color: th.text.secondary }}>Your name (the bots and your team see it):</span>
-                    <input value={meDraft} onChange={(e) => setMeDraft(e.target.value)} onKeyDown={(e: any) => { if (e.key === "Enter") saveMe(); }} placeholder="e.g. Jacob" style={{ flex: "1 1 120px", minWidth: 0, font: "inherit", fontSize: 14, padding: "6px 10px", borderRadius: 10, border: `1px solid ${askMe ? th.fill.accent : th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none" }} />
-                    <button onClick={saveMe} disabled={!meDraft.trim()} style={{ font: "inherit", fontSize: 13, fontWeight: 700, padding: "6px 12px", borderRadius: 999, border: "none", background: meDraft.trim() ? th.fill.accent : th.fill.secondary, color: th.text.onColor, cursor: meDraft.trim() ? "pointer" : "default" }}>Save</button>
+                {(askMe || !me) && <div style={{ marginBottom: 8 }}>{meRow}</div>}
+                {pick && (
+                  <div style={{ position: "absolute", right: 14, bottom: 96, zIndex: 6 }}>
+                    <EmojiPicker onClose={() => setPick(null)} onPick={(e) => {
+                      const p0 = pick; setPick(null);
+                      if (p0.kind === "react") { const m = msgs.find((x) => x.id === p0.msg); if (m) react(m, e); return; }
+                      const el = ta.current, at = el && typeof el.selectionStart === "number" ? el.selectionStart : draft.length;
+                      setDraft(draft.slice(0, at) + e + draft.slice(at));
+                      setTimeout(() => { try { if (el) { el.focus(); el.selectionStart = el.selectionEnd = at + e.length; } } catch (er) {} }, 0);
+                    }} />
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                  <button onClick={() => setPick(pick && pick.kind === "compose" ? null : { kind: "compose" })} title="Emoji" aria-label="Emoji" style={{ height: 42, width: 42, flex: "none", borderRadius: 14, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, cursor: "pointer", fontSize: 19, padding: 0 }}>☺</button>
                   <textarea ref={ta} value={draft} rows={1}
                     onChange={(e: any) => { setDraft(e.target.value); setSendErr(""); const el = e.target; el.style.height = "auto"; el.style.height = Math.min(150, el.scrollHeight) + "px"; }}
                     onKeyDown={(e: any) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); } }}
-                    placeholder={meta.kind === "group" ? `Message the ${meta.name} group…` : `Message ${meta.bot || meta.name}…`}
+                    placeholder={meta.kind === "group" ? `Message #${meta.name}…` : `Message ${meta.bot || meta.name}…`}
                     style={{ flex: 1, minWidth: 0, resize: "none", boxSizing: "border-box", minHeight: 42, maxHeight: 150, font: "inherit", fontSize: 14.5, lineHeight: "21px", padding: "10px 12px", borderRadius: 14, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none" }} />
                   <button onClick={sendMsg} disabled={!draft.trim() || sending} aria-label="Send" style={{ height: 42, padding: "0 16px", borderRadius: 14, border: "none", font: "inherit", fontSize: 14, fontWeight: 700, background: draft.trim() && !sending ? th.fill.accent : th.fill.secondary, color: draft.trim() && !sending ? th.text.onColor : th.text.tertiary, cursor: draft.trim() && !sending ? "pointer" : "default", flex: "none" }}>{sending ? "Sending…" : "Send"}</button>
                 </div>
@@ -3313,6 +3574,36 @@ function ControlCenterInner() {
   const [histTab, setHistTab] = useState<"chats" | "activity">("chats");
   const [chatFocus, setChatFocus] = useState<{ who: string; n: number } | null>(null);
   const [chatUnread, setChatUnread] = useState(0);
+  // 🖥 monitor: links to the bots' computers, saved for the whole team (demo: this browser only)
+  const [monitor, setMonitor] = useState<{ open: boolean; who: string | null }>({ open: false, who: null });
+  const [desk, setDesk] = useState<DeskLink[]>([]);
+  DESK = desk;
+  useEffect(() => {
+    if (DEMO) { try { const v = JSON.parse(localStorage.getItem("ccDesktopDemo") || "[]"); if (Array.isArray(v)) setDesk(v); } catch (e) {} return; }
+    fetch("/api/desktop?ts=" + Date.now(), { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((j) => { if (j && Array.isArray(j.links)) setDesk(j.links); }).catch(() => {});
+  }, []);
+  const saveDesk = async (links: DeskLink[]): Promise<string | null> => {
+    if (DEMO) { try { localStorage.setItem("ccDesktopDemo", JSON.stringify(links)); } catch (e) {} setDesk(links); return null; }
+    try {
+      const r = await fetch("/api/desktop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ links }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) return j.error || "Error " + r.status;
+      setDesk(j.links); return null;
+    } catch (e) { return "No connection to the server"; }
+  };
+  OPEN_MONITOR = (who?: string | null) => setMonitor({ open: true, who: who || null });
+  // the installable app ("desktop version"): register the service worker, offer the browser's install prompt
+  const [installEv, setInstallEv] = useState<any>(null);
+  useEffect(() => {
+    const w: any = globalThis;
+    try { if (w.navigator && w.navigator.serviceWorker && (w.location.protocol === "https:" || w.location.hostname === "localhost")) w.navigator.serviceWorker.register("/sw.js").catch(() => {}); } catch (e) {}
+    const onPrompt = (e: any) => { e.preventDefault(); setInstallEv(e); };
+    const onDone = () => setInstallEv(null);
+    if (w.addEventListener) { w.addEventListener("beforeinstallprompt", onPrompt); w.addEventListener("appinstalled", onDone); }
+    // app shortcuts and links: ?open=chats or ?open=monitor
+    try { const o = new URLSearchParams(w.location.search).get("open"); if (o === "chats") setTimeout(() => { if (OPEN_CHAT) OPEN_CHAT(); }, 300); if (o === "monitor") setMonitor({ open: true, who: null }); } catch (e) {}
+    return () => { if (w.removeEventListener) { w.removeEventListener("beforeinstallprompt", onPrompt); w.removeEventListener("appinstalled", onDone); } };
+  }, []);
   const [hist, setHist] = useState<HistEntry[]>([]);
   const [histLoading, setHistLoading] = useState(false);
   const [sentLocal, setSentLocal] = useState<HistEntry[]>([]); // demo only: the real app reads sent requests from /api/history
@@ -3566,10 +3857,10 @@ function ControlCenterInner() {
   const keyRef = useRef<(e: any) => void>(() => {});
   keyRef.current = (e: any) => {
     const tg = e.target && e.target.tagName ? String(e.target.tagName).toLowerCase() : "";
-    const typing = tg === "input" || tg === "textarea" || (e.target && e.target.isContentEditable);
+    const typing = tg === "input" || tg === "textarea" || tg === "emoji-picker" || (e.target && e.target.isContentEditable);
     if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setSearch(search ? null : { q: "", sel: 0 }); return; }
     if (e.key === "Escape") {
-      if (search) setSearch(null); else if (help) setHelp(false); else if (newsOpen) setNewsOpen(false); else if (drawer) setDrawer(null); else if (feedOpen || inboxOpen) { setFeedOpen(false); setInboxOpen(false); } else if (sheet) setSheet(null); else if (classic && pMember !== null) setPMember(null); else if (classic && inFocus) setInFocus(false); else if (room) exit(); else if (filter) setFilter(null);
+      if (monitor.open) setMonitor({ open: false, who: null }); else if (search) setSearch(null); else if (help) setHelp(false); else if (newsOpen) setNewsOpen(false); else if (drawer) setDrawer(null); else if (feedOpen || inboxOpen) { setFeedOpen(false); setInboxOpen(false); } else if (sheet) setSheet(null); else if (classic && pMember !== null) setPMember(null); else if (classic && inFocus) setInFocus(false); else if (room) exit(); else if (filter) setFilter(null);
       return;
     }
     if (search && !typing) return;
@@ -3600,6 +3891,7 @@ function ControlCenterInner() {
     else if (k === "m" || k === "M") openDrawer("tray");
     else if (k === "f" || k === "F") { if (feedOpen && histTab === "activity") setFeedOpen(false); else openHistory(room || filter); }
     else if (k === "c" || k === "C") { if (feedOpen && histTab === "chats") setFeedOpen(false); else openChats(); }
+    else if (k === "d" || k === "D") { setMonitor(monitor.open ? { open: false, who: null } : { open: true, who: null }); }
   };
   useEffect(() => {
     const w = globalThis as any;
@@ -3676,7 +3968,7 @@ function ControlCenterInner() {
       )}
 
       {/* HUD */}
-      <div style={{ position: "absolute", top: 12, insetInlineStart: "50%", transform: "translateX(-50%)", zIndex: 6, ...pill, gap: phone ? 12 : 16, padding: phone ? "5px 12px" : "6px 14px", maxWidth: "calc(100vw - 20px)", boxSizing: "border-box" }}>
+      <div style={{ position: "absolute", top: 12, insetInlineStart: "50%", transform: "translateX(-50%)", zIndex: 6, ...pill, gap: phone ? 9 : 16, padding: phone ? "5px 12px" : "6px 14px", maxWidth: "calc(100vw - 20px)", boxSizing: "border-box", ...(phone ? { overflowX: "auto", scrollbarWidth: "none" } : {}) } as any}>
         <button onClick={() => { setInboxOpen(!inboxOpen); setFeedOpen(false); setDrawer(null); }} title="waiting for your approval" style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: th.text.accent }}>
           <svg width={22} height={22} viewBox="0 0 20 20" style={{ transform: `scale(${(1 + 0.08 * Math.sin(t * 4)) * bumpS})` }}><path d="M2 11 l3 -7 h10 l3 7 v6 h-16 z" fill="none" stroke={th.text.accent} strokeWidth={1.8} strokeLinejoin="round" /><path d="M2 11 h5 l1 2 h4 l1 -2 h5" fill="none" stroke={th.text.accent} strokeWidth={1.8} /></svg>
           <b style={{ fontSize: 17, display: "inline-block", transform: `scale(${bumpS})` }}>{openTotal}</b>
@@ -3686,7 +3978,7 @@ function ControlCenterInner() {
           <b style={{ fontSize: 15 }}>{queue.length}</b>
         </button>
         <button onClick={() => openDrawer("usage")} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: th.text.primary }} title={`Weekly usage · resets ${USAGE.reset} · on-demand ${USAGE.onDemandPct}%`}>
-          <svg width={34} height={18} viewBox="0 0 46 22"><rect x={1} y={2} width={40} height={18} rx={4} fill="none" stroke={th.text.secondary} strokeWidth={2} /><rect x={42} y={7} width={3} height={8} rx={1} fill={th.text.secondary} /><rect x={4} y={5} width={34 * (left / 100)} height={12} rx={2} fill={th.text.success} opacity={0.7 + 0.3 * Math.sin(t * 2)} /></svg>
+          {!phone && <svg width={34} height={18} viewBox="0 0 46 22"><rect x={1} y={2} width={40} height={18} rx={4} fill="none" stroke={th.text.secondary} strokeWidth={2} /><rect x={42} y={7} width={3} height={8} rx={1} fill={th.text.secondary} /><rect x={4} y={5} width={34 * (left / 100)} height={12} rx={2} fill={th.text.success} opacity={0.7 + 0.3 * Math.sin(t * 2)} /></svg>}
           <b style={{ fontSize: 14 }}>{USAGE.weeklyPct}%</b>
         </button>
         <button onClick={() => openDrawer("clock")} title={alertN ? "Scheduled tasks · some failed" : "Scheduled tasks"} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: alertN ? th.text.danger : th.text.primary }}>
@@ -3694,8 +3986,11 @@ function ControlCenterInner() {
           <b style={{ fontSize: 14 }}>{upcoming.length}</b>
         </button>
         {fresh3 > 0 && (
-          <button onClick={() => { setNewsOpen(!newsOpen); setSearch(null); }} title="What changed since your last visit (N)" style={{ display: "flex", alignItems: "center", gap: 4, background: th.fill.accent, border: "none", borderRadius: 999, padding: "3px 9px", cursor: "pointer", font: "inherit", fontSize: 12.5, fontWeight: 700, color: th.text.onColor, transform: `scale(${1 + 0.04 * Math.sin(t * 3)})` }}>✦ {fresh3}{phone ? "" : " new"}</button>
+          <button onClick={() => { setNewsOpen(!newsOpen); setSearch(null); }} title="What changed since your last visit (N)" style={{ display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", flex: "none", background: th.fill.accent, border: "none", borderRadius: 999, padding: "3px 9px", cursor: "pointer", font: "inherit", fontSize: 12.5, fontWeight: 700, color: th.text.onColor, transform: `scale(${1 + 0.04 * Math.sin(t * 3)})` }}>✦ {fresh3}{phone ? "" : " new"}</button>
         )}
+        {!phone && (<button onClick={() => setMonitor(monitor.open ? { open: false, who: null } : { open: true, who: null })} title="Watch the Grok Bot's computer (D)" aria-label="Computer" style={{ display: "flex", alignItems: "center", background: "none", border: "none", padding: 0, cursor: "pointer", color: monitor.open ? th.text.accent : th.text.primary }}>
+          <svg width={20} height={20} viewBox="0 0 20 20"><rect x={2} y={3.5} width={16} height={10.5} rx={1.8} fill="none" stroke="currentColor" strokeWidth={1.8} /><path d="M7 17.5 h6 M10 14 v3.5" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" /></svg>
+        </button>)}
         <button onClick={() => { if (feedOpen && histTab === "chats") setFeedOpen(false); else openChats(); }} title="Chats: your team's conversations with the bots (C)" style={{ position: "relative", display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: feedOpen && histTab === "chats" ? th.text.accent : th.text.primary }}>
           <svg width={20} height={20} viewBox="0 0 20 20"><path d="M3 4.5 h14 a1.5 1.5 0 0 1 1.5 1.5 v7 a1.5 1.5 0 0 1 -1.5 1.5 h-8 l-4 3 v-3 h-2 a1.5 1.5 0 0 1 -1.5 -1.5 v-7 a1.5 1.5 0 0 1 1.5 -1.5 z" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinejoin="round" /></svg>
           {!phone && <b style={{ fontSize: 13.5 }}>Chats</b>}
@@ -3806,13 +4101,23 @@ function ControlCenterInner() {
 
       {/* keyboard help */}
       {help && (
-        <div onClick={() => setHelp(false)} style={{ position: "absolute", top: 60, left: "50%", transform: "translateX(-50%)", width: "min(460px, calc(100% - 24px))", zIndex: 10, ...glass, borderRadius: 20, padding: "14px 18px" }}>
+        <div onClick={() => setHelp(false)} style={{ position: "absolute", top: 60, left: "50%", transform: "translateX(-50%)", width: "min(460px, calc(100% - 24px))", maxHeight: "calc(100% - 80px)", overflowY: "auto", zIndex: 10, ...glass, borderRadius: 20, padding: "14px 18px" }}>
+          <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${th.border.weak}` }}>
+            <b style={{ fontSize: 15 }}>Install as an app</b>
+            <div style={{ fontSize: 13, color: th.text.secondary, lineHeight: "19px", marginTop: 4 }}>Its own window and icon, on your computer or phone.</div>
+            {installEv
+              ? <button onClick={(e) => { e.stopPropagation(); try { installEv.prompt(); installEv.userChoice.finally(() => setInstallEv(null)); } catch (er) {} }} style={{ marginTop: 8, font: "inherit", fontSize: 13.5, fontWeight: 700, padding: "7px 14px", borderRadius: 999, border: "none", background: th.fill.accent, color: th.text.onColor, cursor: "pointer" }}>⬇ Install Control Center</button>
+              : <div style={{ fontSize: 12.5, color: th.text.tertiary, lineHeight: "19px", marginTop: 6 }}>Chrome / Edge: ⋮ menu → Cast, save and share → Install page as app. Mac Safari: File → Add to Dock. iPhone / iPad: Share → Add to Home Screen. Android: ⋮ → Add to home screen.</div>}
+          </div>
           <b style={{ fontSize: 15 }}>Keyboard shortcuts</b>
-          {[["/ or Ctrl+K", "Search"], ["1–9", "Open a team's room"], ["] / [", "Next / previous team (all teams, also past 9)"], ["Esc", "Close / back to campus"], ["A / W", "Approvals window / In-progress window"], ["N", "What's new since your last visit"], ["M", "Bot tray"], ["C", "Chats (your team's conversations with the bots)"], ["F", "Activity (all bot events and what you sent)"], ["+ / −", "Zoom"], ["Q / E", "Rotate the camera"], ["T", "Tilt the camera"], ["H", "Back to the overview"], ["Enter", "Enter the room (from the room view)"], ["← →", "In a room: switch boards"], ["Drag in a room", "look around · double-click: normal view"], ["↑ ↓", "In a room: previous / next room"], ["Drag", "pan · right/Shift+drag: rotate · wheel: zoom"]].map(([k, d]) => (
+          {[["/ or Ctrl+K", "Search"], ["1–9", "Open a team's room"], ["] / [", "Next / previous team (all teams, also past 9)"], ["Esc", "Close / back to campus"], ["A / W", "Approvals window / In-progress window"], ["N", "What's new since your last visit"], ["M", "Bot tray"], ["C", "Chats (your team's conversations with the bots)"], ["D", "Watch a bot's computer (🖥)"], ["F", "Activity (all bot events and what you sent)"], ["+ / −", "Zoom"], ["Q / E", "Rotate the camera"], ["T", "Tilt the camera"], ["H", "Back to the overview"], ["Enter", "Enter the room (from the room view)"], ["← →", "In a room: switch boards"], ["Drag in a room", "look around · double-click: normal view"], ["↑ ↓", "In a room: previous / next room"], ["Drag", "pan · right/Shift+drag: rotate · wheel: zoom"]].map(([k, d]) => (
             <div key={k} style={{ display: "flex", gap: 10, fontSize: 13, padding: "5px 0", borderBottom: `1px solid ${th.border.weak}` }}><b dir="ltr" style={{ minWidth: 92, color: th.text.accent }}>{k}</b><span>{d}</span></div>
           ))}
         </div>
       )}
+
+      {/* 🖥 watch a bot's computer */}
+      <MonitorPanel open={monitor.open} who={monitor.who} links={desk} onSave={saveDesk} onClose={() => setMonitor({ open: false, who: null })} phone={phone} />
 
       {/* history panel (was the small "Full feed" drawer) */}
       <HistoryPanel open={feedOpen} onClose={() => setFeedOpen(false)} startTeam={histTeam} server={hist} local={sentLocal} loading={histLoading} idxOf={idxOf} fresh={freshMap} onEnter={(id) => enter(id, "news")} phone={phone} tab={histTab} onTab={(k) => setHistTab(k)} chatFocus={chatFocus} unread={chatUnread} onUnread={setChatUnread} />

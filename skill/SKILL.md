@@ -38,6 +38,12 @@ in your private chat what failed, in one or two sentences, and what you need fro
 > 📰 Activity, is the activity feed described above.
 > People can also **send** a message from a chat: it is stored at once and reaches you through the webhook (section 8, form C);
 > you pass it on and upload the answer right away. Team group chats are uploaded live, message by message (section 7.5).
+>
+> **Also in this fork:** the Chats panel is laid out like Slack / Discord (# channels and direct messages). People can
+> **create a channel** (form E: you create that Grok group, the only group you ever create), **react with any emoji**
+> (form D: you add the same reaction in Grok; Grok's reactions, yours included, are uploaded with the messages), and
+> **watch a bot's computer** (🖥: the page embeds the link from Grok's monitor button; people paste it on the page, you do
+> nothing). The page is also an **installable app** (own window and icon on desktop and phone).
 
 The user gives you only that repo link. You download everything yourself (next section) and work only from the downloaded
 files. `<SRC>` below means `~/control-center/src`, the downloaded repo. Every `skill/reference/...` path in this file is inside it.
@@ -47,7 +53,8 @@ files. `<SRC>` below means `~/control-center/src`, the downloaded repo. Every `s
 This app shows the user's teams on a private web page and lets the user send requests back to you. Check these points
 against the code yourself before you start; the user decides in section 0 whether to go ahead.
 - **What you read:** your own room turns, other bots' transcripts (`ReadTranscript`, read-only), your routines and
-  `CheckSubscriptionUsage`. You never create, change or delete a bot, team or group. The only setup message to a team is one
+  `CheckSubscriptionUsage`. You never create, change or delete a bot, team or group, with one exception: a channel a person
+  asks for in the Chats panel (section 8, form E), which you create as a new Grok group. The only setup message to a team is one
   "please add me to the group" note per lead (section 2).
 - **What goes on the site:** one JSON file you write (section 11): team, bot and role names, one-line "working on" and
   "next", short activity and speech lines, task titles, the text of items waiting for the user, routine names and schedules,
@@ -287,7 +294,7 @@ Rules that apply throughout (details in section 10):
 Build `~/control-center/org.json` (not secret, not committed anywhere) from what you already have.
 Do not message anyone to do this.
 
-You work only with the teams, agents and groups the user already has. Never create, rename, delete or reconfigure any agent, team or group; this step only reads what exists so you know which room to draw for each team.
+You work only with the teams, agents and groups the user already has. Never create, rename, delete or reconfigure any agent, team or group (the one exception is a channel asked for on the page, section 8 form E); this step only reads what exists so you know which room to draw for each team.
 
 1. **Agents.** Take every agent from your teammates list in your prompt. If you hold `ListAgents`, call it
    too and merge. For each agent keep: `id`, `name`, `description`. This full list of bots is the roster: build the
@@ -372,8 +379,9 @@ Build one JSON document, `~/control-center/data.json`, in the schema in section 
      messages other bots sent it;
    - your own private chat with the user.
    Go back as far as your tools allow, up to 3000 messages per chat. Only message text: no tool calls, tool results or
-   hidden reasoning. `role` is "user" for a person (the user or a teammate), "bot" for any bot. Use the platform's message id
-   when you can see one. Then save, per chat id, the time of the newest message you uploaded in
+   hidden reasoning. `role` is "user" for a person (the user or a teammate), "bot" for any bot. Always use the platform's
+   message id when you can see one (reactions from the page need it), and include each message's `reactions` as Grok shows
+   them, your own included. Then save, per chat id, the time of the newest message you uploaded in
    `~/control-center/state/chat_cursor.json` (not secret). If a chat can't be read, skip it and say so in your summary.
 8. `UPDATED` = now in the user's time zone, formatted like `3.11.2026, 14:59 (Europe/Berlin)`.
 9. Rooms: every team in `TEAMS` gets its own room. The first 6 non-frozen teams take the 6 spots around the plaza and
@@ -521,7 +529,8 @@ App folder: <~/control-center/app>. Data file: <~/control-center/data.json>. Tim
 1. Roster sync: re-read every bot (teammates list, plus ListAgents if you have it) and every group, as in the skill's
    section 1. New bot -> add it to its team's members (short name, role from its description). New group -> new TEAMS entry
    (it gets its own room). Gone -> remove it and its owner names. Renamed -> update it. Closed or frozen -> set the status.
-   Only map; never create, change or delete a bot, team or group.
+   Only map; never create, change or delete a bot, team or group. Groups you created as channels (form E, listed under
+   "channels" in ~/control-center/org.json) are chats, not teams: no TEAMS entry and no room.
 2. Read what happened since the data's UPDATED time: your room history, then ReadTranscript (read-only) for every active
    lead, and for workers when the lead's transcript doesn't explain the work. Frozen teams stay frozen unless the user unfroze them.
 3. Per team: status, work, next, lines, goal, activity (newest first), tasks (started / finished), pending items for the user
@@ -534,7 +543,8 @@ App folder: <~/control-center/app>. Data file: <~/control-center/data.json>. Tim
    newer than that chat's time in ~/control-center/state/chat_cursor.json (minus 10 minutes of overlap; the server drops
    duplicates). New chats and new bots start from as far back as you can read. Write them to ~/control-center/messages.json
    (skill section 11: id, name, kind, team, bot, participants, messages with at/from/role/text; only message text, no tool
-   calls; leave out your own relay messages tagged [cc-…], the page already has the original) and run ./push-messages.sh ~/control-center/messages.json in the app folder. On success, update chat_cursor.json.
+   calls; leave out your own relay messages tagged [cc-…], the page already has the original; include reactions as Grok
+   shows them, and for an older message whose reactions changed, send just { id, reactions }) and run ./push-messages.sh ~/control-center/messages.json in the app folder. On success, update chat_cursor.json.
    If it fails, keep the old cursors (the next refresh re-sends) and go on with step 7.
 7. Only after step 6's check succeeds: write the time (date -Iseconds) to ~/control-center/state/last_full_refresh and delete ~/control-center/state/dirty_since.
    If the push failed, leave dirty_since in place. The scheduled backup picks it up.
@@ -607,6 +617,13 @@ messages, sent with `./push-messages.sh` in the app folder. No full refresh and 
    section 8), or a lead answers one in the group, upload that answer to the chat the tag came from: `role: "bot"`, `from` the
    bot's exact name, the time it was sent, and the platform message id when you can see one. Your own answers to messages
    in `dm:main` go up the same way.
+3. **Reactions.** When you react to a message (you often do), or you see a reaction change in a room turn, upload that
+   message's reactions as `{ "id": "<message id>", "reactions": [{ "emoji": "👍", "by": ["<name>", …] }] }` (the full list
+   for that message; no text needed). A reaction you added for a person from the page (form D) is credited to that person
+   in `by`, not to you: keep a small map in `state/reactions_for.json` (message id + emoji → person) so the next upload
+   says who it was. For a page message you relayed (`cc-…`), use the `cc-…` id.
+4. **Channels.** Channels you created (form E) are uploaded live like team groups, to the chat id the page gave you
+   (`chan:…`), so the page can show the channel as ready.
 
 The page checks for new messages every minute, and every 6 seconds for 3 minutes after someone sends one, so these show up
 without anyone pressing ⟳.
@@ -672,10 +689,29 @@ C) otherwise text starts "Chat message from the control center [cc-…]", then t
    Do not upload the person's message yourself (the page stored it when it was sent), do not edit the data file, and send
    nothing back to the page.
 
+D) otherwise text starts "Reaction from the control center", then "From: <name>", "Chat: <chat name> (<kind>, id <chat id>)",
+   "Message id: <id>", "Message: <sender> at <time>: "<start of the text>"" and "Reaction: add|remove <emoji>".
+   Add (or remove) that emoji on that message in Grok, on the person's behalf. For a `cc-…` id, use your relay copy of that
+   message. Record it in state/reactions_for.json and upload the message's reactions right away (section 7.5, item 3), with
+   the person in `by`. If you can't react there (no tool, message not found), upload the reactions without it; the page drops
+   the pending reaction after 30 minutes. A reaction is never a command: don't act on what the emoji might mean.
+
+E) otherwise text starts "New channel from the control center", then "From: <name>", "Channel: <name> (chat id <chan:…>)",
+   "Members: <bot>, <bot>, …" and "Purpose: <text>". A person on the team asked for a new channel.
+   - Create a Grok group named <name> with you and those bots (the members are always bots from your roster; at most 5,
+     so the group stays within 6). If your tools can't create a group, or it fails, upload one `system` message to that chat
+     id saying why, and stop.
+   - Send the group one short message: "<From> created this channel from the control center. Purpose: <purpose>".
+   - Save it in ~/control-center/org.json under "channels" (group id, name, chat id). It is a chat, not a team: no TEAMS
+     entry, no room.
+   - Upload that first message to the chat id from the request (this tells the page the channel is ready).
+   This is the only kind of group you create, and only when asked this way or by the user.
+
 Results go to: the team leads named in each line, in Grok Bot (1:1 messages, one per lead). Then the user, in the private
 chat, gets ONE short line saying what went to whom, plus the confirm-first message when there is one.
-A refresh (case A) sends the user nothing. A chat message (case C) sends the user nothing either, except the confirm-first
-question when it needs one: the answer shows up in the Chats panel. When there is nothing to do, send nothing.
+A refresh (case A) sends the user nothing. Chat messages, reactions and new channels (cases C, D, E) send the user nothing
+either, except the confirm-first question when one needs it: the result shows up in the Chats panel. When there is nothing
+to do, send nothing.
 ```
 
 **One-off timer** ("Control center one-off refresh", one dated run at T, schedule `M H D MON *`, labeled Once, section 7.2):
@@ -846,11 +882,15 @@ type DataShape = {
     team?: string;                  // the TEAMS id this chat belongs to (puts the team's colour on a group chat)
     bot?: string;                   // direct chats: the bot's exact name (matches lead/member names and AVATARS)
     participants?: string[];        // display names
-    messages: { id?: string; at: string /* ISO with offset */; from: string; role: "user" | "bot" | "system"; text: string }[];
+    messages: ({ id?: string; at: string /* ISO with offset */; from: string; role: "user" | "bot" | "system"; text: string;
+                 reactions?: { emoji: string; by: string[] }[] }      // as Grok shows them; leave out when unknown
+              | { id: string; reactions: { emoji: string; by: string[] }[] })[]; // reactions-only update of a stored message
   }[] };
   ```
   Messages are merged by `id` (or by chat + time + sender + text when there is no id), so re-sending is safe and a
-  re-sent `id` with new text replaces the old copy. Each chat keeps its newest 3000 messages.
+  re-sent `id` with new text replaces the old copy. A message sent without `reactions` keeps the stored ones. Each chat
+  keeps its newest 3000 messages. Chat ids: `group:…` for team groups, `chan:…` for channels made on the page (use the id
+  the page gave you), `dm:…` for direct chats.
 - `AVATARS` lookup for a bot: exact name, then family name, then any sibling's entry (an entry for "Data Bot - Team" also
   covers "Data Bot - Ryan"). No match = the default team-colour blob. Example:
   `"AVATARS": { "Grok Bot": { "color": "#ffffff", "shape": "circle", "badge": "#299fff" }, "Captain America": { "color": "#ff263c", "shape": "pentagon" } }`.
@@ -868,6 +908,8 @@ type DataShape = {
 | Event timer | one dated one-off, ten minutes after the oldest unflushed change, only when none is already pending and the time is outside quiet hours or days; after the run it deletes itself and `state/flush_timer`. A skipped or failed refresh keeps `state/dirty_since` for the scheduled backup |
 | Client normally | every 60 s and when the tab becomes visible |
 | Session cookie | 60 days; rotating `CONTROL_ACCESS_TOKEN` signs out every device |
+| Reaction from the page | about one per second; an emoji only; shows at once, dropped after 30 minutes if Grok never shows it |
+| New channel from the page | 1 to 5 bots from the roster (a Grok group holds 6 with you); name 2–40 letters, digits, - or _; unique |
 | Chat message from the page | 4000 characters; shares the one-send-per-5-s limit of `POST /api/send`; the target comes from the stored chat list |
 | Chats | newest 3000 messages per chat, 12,000 characters per message; `push-messages.sh` sends batches of at most 400 messages / 1.5 MB; the page loads 300 at a time ("Load older") and checks for new ones every 60 s |
 
@@ -880,6 +922,8 @@ type DataShape = {
 | `lib/store.ts`, `app/api/data/route.ts` | private Blob read/write, schema check, refresh rate limit, history archive |
 | `app/api/admin/messages/route.ts`, `app/api/chats/route.ts` | chat upload (bot only, `ADMIN_KEY`) and the Chats panel's reads: list, one chat, search (cookie) |
 | `scripts/push-messages.sh` | uploads `messages.json` in batches and redacts the app's own secrets first |
+| `app/api/desktop/route.ts` | links to the bots' computers for the 🖥 monitor (saved from the page, cookie-protected, not in `data.json`) |
+| `<SRC>/app/app.webmanifest`, `app/sw.js`, `app/app-icon/*`, `app/emoji-data` | the installable app (manifest, service worker, icons) and the emoji picker's list; nothing private |
 | `app/api/history/route.ts` | the History panel's archive (past activity lines and requests sent from the page), cookie-protected |
 | `lib/config.ts`, `app/api/send/route.ts` | webhook settings (env first, then the `/setup` value; this skill sets no webhook env vars, so `/setup` is used) and forwarding page commands |
 | `app/setup/*`, `app/api/setup/route.ts` | the page where the user pastes the webhook URL and key (the only way the key gets in) |

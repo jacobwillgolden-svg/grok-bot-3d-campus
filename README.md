@@ -17,11 +17,12 @@ approvals and numbers are all made up, and no button contacts anything.
 ## Why it's built this way (safety model)
 
 - **What it reads:** your main bot reads its own team chats and your other bots' transcripts, read-only, plus routines and usage.
-  It never creates, changes or deletes a bot or team.
+  It never creates, changes or deletes a bot or team. The one exception in this fork: a channel someone creates from the
+  Chats panel, which the bot creates as a new Grok group with the bots that person picked.
 - **What goes online:** one JSON file the bot writes: team and bot names, what each works on, task titles, items waiting for
   your approval, routine schedules and usage %. **In this fork, also a copy of your team's chats with the bots** (message
-  text, sender, time; no files or tool calls; the app's own secrets are redacted before upload). It's stored privately in
-  **your own** Vercel account.
+  text, sender, time and reactions; no files or tool calls; the app's own secrets are redacted before upload), and the
+  monitor links people paste. It's stored privately in **your own** Vercel account.
 - **Who can open it:** only someone with your private link (a random token). Everything else returns 404, and search engines
   are told not to index it. You can add a Vercel login on top for free on any plan (SKILL section 10.1).
 - **Who can act:** buttons and messages typed in the Chats panel go to your main bot as requests, signed with a key only you
@@ -72,6 +73,13 @@ The full list with triggers is in [`skill/SKILL.md`](skill/SKILL.md#ui-states-re
   from **Chats** in the top bar, **C**, or **💬 Chat history** on any bot. **Send messages from the page too:** they go
   through your main bot to that bot or group, and the answer shows up in the same chat. Team group chats update live;
   direct chats with other bots update with each refresh.
+- **Channels, reactions, monitor** (this fork): Chats is laid out like Slack / Discord, with **# channels** (your team
+  groups) and **direct messages**, unread counts, and **+ New channel** (your Grok Bot creates the group in Grok with the
+  bots you pick). **React with any emoji** (full picker with search); reactions sync both ways with Grok, including the
+  bots' own. **🖥 Watch a bot's computer** in the page: paste the link from Grok's monitor button once (top bar 🖥, **D**,
+  or 🖥 Computer on any bot).
+- **Install it as an app** (this fork): Chrome / Edge "Install", Mac Safari "Add to Dock", iPhone "Add to Home Screen":
+  its own window and icon. App shortcuts open Chats or the monitor directly.
 - **History** (this fork): one searchable, full-height panel with every bot event and every request you sent, grouped by
   day and filterable by team. The real app keeps an archive in your private Blob, so events stay after each refresh
   (newest 2000, 90 days). Open it from **History** in the top bar, the LIVE bar, **F**, or **🕘 Full history** in a room.

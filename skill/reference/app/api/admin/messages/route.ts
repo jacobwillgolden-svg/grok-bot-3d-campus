@@ -11,6 +11,6 @@ export async function POST(req: Request) {
   try { body = await req.json(); } catch {}
   const chats = Array.isArray(body?.chats) ? body.chats.map(cleanChat).filter(Boolean) : [];
   if (!chats.length) return Response.json({ ok: false, error: "need chats[] with id, name and messages[{at, from, role, text}]" }, { status: 400 });
-  const r = await appendChats(chats as any);
+  const r = await appendChats(chats as any, { fromBot: true });
   return Response.json({ ok: true, ...r });
 }
