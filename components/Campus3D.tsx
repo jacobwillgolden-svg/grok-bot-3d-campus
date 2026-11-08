@@ -4,8 +4,9 @@ import { TZ } from "../lib/tz";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { PALETTE } from "../lib/theme";
-import { roomGeo, agentsOf, W3, ctrlFor, qpt, PLAZA, TREES, campusGrow } from "./ControlCenter";
+import { roomGeo, agentsOf, W3, ctrlFor, qpt, PLAZA, TREES, campusGrow, avatarFor, avatarSig, shapeOutline, SHAPE_TILT, SHAPE_EYE } from "./ControlCenter";
 
 const P = PALETTE;
 type Pick = { team: string; what?: string; member?: number };
@@ -37,7 +38,7 @@ export default function Campus3D(props: any) {
 
   // data signature: rebuild rooms only when something visible in 3D changes
   const teams: any[] = props.teams;
-  const sig = JSON.stringify(teams.map((t) => [t.id, t.status, t.members.length, t.tasks.map((k: any) => k.state + (k.owner || "")).join(","), (props.openOf || {})[t.id] || 0, t.activity.length ? t.activity[0].text : "", t.goal ? t.goal.current : null]));
+  const sig = JSON.stringify(teams.map((t) => [t.id, t.status, t.members.length, t.tasks.map((k: any) => k.state + (k.owner || "")).join(","), (props.openOf || {})[t.id] || 0, t.activity.length ? t.activity[0].text : "", t.goal ? t.goal.current : null, avatarSig(t)]));
 
   useEffect(() => {
     const el = host.current; if (!el) return;
@@ -93,6 +94,24 @@ export default function Campus3D(props: any) {
       cap: new THREE.CapsuleGeometry(0.17, 0.16, 8, 20), cyl: new THREE.CylinderGeometry(1, 1, 1, 24), cone4: new THREE.ConeGeometry(0.46, 0.62, 4, 1), cone: new THREE.ConeGeometry(1, 1, 6), ico: new THREE.IcosahedronGeometry(1, 1),
     };
     const boxGeo = geo.box.clone(); boxGeo.translate(0, 0.5, 0); // base at y=0 for scaling walls
+    // ---- Grok avatars: a puffy extruded token per shape (unit size, centred) and a glossy material per colour ----
+    const avGeo = (shape: string): THREE.BufferGeometry => {
+      const k = "av_" + shape; if ((geo as any)[k]) return (geo as any)[k];
+      const sh = new THREE.Shape();
+      shapeOutline(shape as any).forEach((sg: any) => { if (sg[0] === "M") sh.moveTo(sg[1], sg[2]); else if (sg[0] === "L") sh.lineTo(sg[1], sg[2]); else sh.quadraticCurveTo(sg[1], sg[2], sg[3], sg[4]); });
+      let g: THREE.BufferGeometry = new THREE.ExtrudeGeometry(sh, { depth: 0.55, bevelEnabled: true, bevelThickness: 0.42, bevelSize: 0.2, bevelSegments: 8, curveSegments: 12 });
+      g.computeBoundingBox(); const bb = g.boundingBox!; g.translate(-(bb.min.x + bb.max.x) / 2, -(bb.min.y + bb.max.y) / 2, -(bb.min.z + bb.max.z) / 2);
+      g.scale(1 / (bb.max.x - bb.min.x), 1 / (bb.max.y - bb.min.y), 1 / (bb.max.z - bb.min.z));
+      // weld the cap and bevel so the normals are smooth (a soft blob, not a faceted block)
+      g.deleteAttribute("normal"); g.deleteAttribute("uv"); g = mergeVertices(g, 1e-4); g.computeVertexNormals();
+      (geo as any)[k] = g; return g;
+    };
+    const avMats = new Map<string, THREE.Material>();
+    const avMat = (color: string, sleep: boolean): THREE.Material => {
+      const k = color + (sleep ? "z" : ""); let m = avMats.get(k);
+      if (!m) { m = sleep ? M(color, { roughness: 0.6, transparent: true, opacity: 0.55 }) : mobile ? M(color, { roughness: 0.35 }) : new THREE.MeshPhysicalMaterial({ color, roughness: 0.32, clearcoat: 0.6, clearcoatRoughness: 0.25 }); avMats.set(k, m); }
+      return m;
+    };
     const mesh = (g: THREE.BufferGeometry, m: THREE.Material, sx: number, sy: number, sz: number, x: number, y: number, z: number, shadow = true) => {
       const o = new THREE.Mesh(g, m); o.scale.set(sx, sy, sz); o.position.set(x, y, z); o.castShadow = shadow && !mobile; o.receiveShadow = !mobile; return o;
     };
@@ -170,15 +189,30 @@ export default function Campus3D(props: any) {
 
     const makeAgent = (a: any, seed: number) => {
       const g = new THREE.Group(); const body = new THREE.Group(); g.add(body);
-      const sleep = a.state === "sleep"; const mat = (sleep ? blobMatsSleep : blobMats)[a.ci % 6];
+      const sleep = a.state === "sleep";
+      const av = a.name ? avatarFor(a.name) : null; // the bot's look in the Grok Bot app, when the data names one
+      const mat = av ? avMat(av.color, sleep) : (sleep ? blobMatsSleep : blobMats)[a.ci % 6];
       const shape = Math.abs(seed) % 3; const S = a.lead ? 1.15 : 1;
       let b: THREE.Mesh;
+      if (av && av.shape) {
+        const ash = av.shape;
+        if (ash === "circle") b = mesh(geo.sph, mat, 0.23 * S, 0.24 * S, 0.22 * S, 0, 0.24 * S, 0);
+        else { b = mesh(avGeo(ash), mat, 0.43 * S, 0.43 * S, 0.3 * S, 0, 0.215 * S, 0); b.rotation.z = (SHAPE_TILT[ash] * Math.PI) / 180; }
+        body.add(b);
+        const topY = (ash === "circle" ? 0.48 : 0.44) * S, eyeY = (ash === "circle" ? 0.48 : 0.43) * S * SHAPE_EYE[ash] + 0.01, ez = (ash === "circle" ? 0.2 : 0.15) * S;
+        return finishAgent(g, body, b, mat, a, seed, S, topY, eyeY, ez, sleep, av.badge);
+      }
       if (shape === 0) b = mesh(geo.sph, mat, 0.22 * S, 0.25 * S, 0.21 * S, 0, 0.25 * S, 0);
       else if (shape === 1) b = mesh(geo.cap, mat, S, S, S, 0, 0.34 * S, 0);
       else { b = mesh(geo.sph, mat, 0.24 * S, 0.22 * S, 0.22 * S, 0, 0.23 * S, 0); const b2 = mesh(geo.sph, mat, 0.15 * S, 0.15 * S, 0.15 * S, 0.06 * S, 0.38 * S, 0); body.add(b2); }
       body.add(b);
       const topY = shape === 1 ? 0.67 * S : shape === 0 ? 0.5 * S : 0.53 * S;
       const eyeY = topY * 0.66, ez = shape === 1 ? 0.165 * S : 0.2 * S;
+      return finishAgent(g, body, b, mat, a, seed, S, topY, eyeY, ez, sleep);
+    };
+    // eyes, hands, feet, crown, alert and z's: the same for every body shape
+    const finishAgent = (g: THREE.Group, body: THREE.Group, b: THREE.Mesh, mat: THREE.Material, a: any, seed: number, S: number, topY: number, eyeY: number, ez: number, sleep: boolean, badge?: string) => {
+      if (badge) body.add(mesh(geo.sph, avMat(badge, false), 0.075 * S, 0.075 * S, 0.06 * S, 0.17 * S, 0.13 * S, ez - 0.02, false));
       const eyes = new THREE.Group(); eyes.position.set(0, eyeY, ez); body.add(eyes);
       const mkEye = (x: number) => { const e = new THREE.Group(); e.position.x = x; const ball = mesh(geo.sphLo, mats.eye, 0.035 * S, 0.048 * S, 0.02 * S, 0, 0, 0, false); e.add(ball); const sh = mesh(geo.sphLo, mats.shine, 0.011 * S, 0.011 * S, 0.008 * S, 0.01 * S, 0.016 * S, 0.016 * S, false); e.add(sh); eyes.add(e); return e; };
       const eL = mkEye(-0.075 * S), eR = mkEye(0.075 * S);

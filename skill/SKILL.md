@@ -24,6 +24,11 @@ in your private chat what failed, in one or two sentences, and what you need fro
 > (`control-center/history.json`, newest 2000 entries, 90 days): every data push copies its activity lines there and
 > every request sent from the page is logged, read by `GET /api/history` (same cookie as `/api/data`). Nothing changes
 > in the data schema, the routines or `push-data.sh`. Older reference screenshots still show the old "Full feed".
+>
+> **It also draws every bot like its avatar in the Grok Bot app** (exact colour, approximate shape) from an optional
+> `AVATARS` map in the data (section 11). Entries are keyed by family name, so "Captain America" also covers
+> "Captain America - Team", "Captain America - Ryan" and later ones. The server keeps the map across pushes. Bots without an
+> entry keep the default look, so the visual check is unchanged until you add one.
 
 The user gives you only that repo link. You download everything yourself (next section) and work only from the downloaded
 files. `<SRC>` below means `~/control-center/src`, the downloaded repo. Every `skill/reference/...` path in this file is inside it.
@@ -171,7 +176,7 @@ Team/agent colours in order: `#2f8cff`, `#2ecc71`, `#ff8a1f`, `#ff2d9b`, `#8f5bf
 
 **Campus** (`Campus3D.tsx`, three.js):
 - 6 active slots, two rows of 3, around a central plaza with a clock tower (magenta roof, live clock faces, pulsing magenta rings).
-  3 frozen slots in a column on the left. Extra teams get generated rooms in columns of 3 (section 3, step 7). Curved roads with moving dashes run from the plaza to each active room; small blobs walk them. Trees around.
+  3 frozen slots in a column on the left. Extra teams get generated rooms in columns of 3 (section 3, step 8). Curved roads with moving dashes run from the plaza to each active room; small blobs walk them. Trees around.
 - Camera: perspective, FOV 34°. Default view looks at the campus straight from the front (azimuth 0), polar angle 0.6 rad
   (about 55° down), fitted to the free screen area. Orbit limits: polar 0.2–1.28 rad, distance 3–55. Left drag pans,
   right drag rotates, wheel zooms; buttons + − ⟲ ⟳ ⌂. Clicking a room flies the camera to it (polar 0.9).
@@ -339,8 +344,15 @@ Build one JSON document, `~/control-center/data.json`, in the schema in section 
 5. **Usage.** Call `CheckSubscriptionUsage` once with `breakdown: ["bot"]`, `limit: 20`. Fill `USAGE.weeklyPct`,
    `reset`, `onDemandPct`, `period`. `topBots` = the top 5 bots. `byTeam` = the sum of each team's bots' shares.
    Set each team's `usage` to its share as a string (for example "18%") and `botUsage` per bot.
-6. `UPDATED` = now in the user's time zone, formatted like `3.11.2026, 14:59 (Europe/Berlin)`.
-7. Rooms: every team in `TEAMS` gets its own room. The first 6 non-frozen teams take the 6 spots around the plaza and
+6. **Avatars (optional, set once).** `AVATARS` maps a bot's family name (the part of its name before " - ") or its exact
+   name to `{ color, shape, badge? }`: its avatar in the Grok Bot app, with `color` the exact hex and `shape` the closest of
+   `circle`, `squircle` (rounded square), `triangle` (rounded triangle), `pentagon` (rounded "house") or `star` (six soft
+   points). `badge` is an optional hex for a small dot (your own avatar's dot). Take them from what you can see. If your tools
+   don't show avatars, ask the user once in your private chat for a screenshot of their bot list and read the colours and
+   shapes from it. Never guess a colour. The server keeps the last `AVATARS` it received, so send it again only when a bot
+   family is added or changes (a push without `AVATARS` keeps the saved one; `{}` clears it).
+7. `UPDATED` = now in the user's time zone, formatted like `3.11.2026, 14:59 (Europe/Berlin)`.
+8. Rooms: every team in `TEAMS` gets its own room. The first 6 non-frozen teams take the 6 spots around the plaza and
    the first 3 frozen teams the side wing; any team beyond that gets a generated room (extra active rooms in columns of 3
    on the right, extra frozen rooms in columns of 3 on the left), and the camera and the minimap frame all of them.
    Do not hide or re-status a team to save space. `TEAMS` order = room order (keys 1–9 open the first nine; `]` / `[` walk
@@ -756,10 +768,15 @@ type DataShape = {
                  lastRun?: string; lastResult?: "ok" | "fail"; next?: string; perWeek?: number; note?: string }[];
     unscanned?: string[]; botUsage?: { owner: string; pct: number }[];
   }[];
+  // optional: each bot's look in the Grok Bot app, keyed by family name ("Data Bot") or exact name ("Data Bot - Ryan")
+  AVATARS?: Record<string, { color: string /* "#ff309b" */; shape?: "circle" | "squircle" | "triangle" | "pentagon" | "star"; badge?: string }>;
 };
 ```
 
 - `next` on a routine is an ISO time with offset so the page can count down.
+- `AVATARS` lookup for a bot: exact name, then family name, then any sibling's entry (an entry for "Data Bot - Team" also
+  covers "Data Bot - Ryan"). No match = the default team-colour blob. Example:
+  `"AVATARS": { "Grok Bot": { "color": "#ffffff", "shape": "circle", "badge": "#299fff" }, "Captain America": { "color": "#ff263c", "shape": "pentagon" } }`.
 - Empty valid document: `{"UPDATED":"","USAGE":{"weeklyPct":0,"reset":"","onDemandPct":0,"period":"","byTeam":[],"topBots":[]},"TEAMS":[]}`.
 - `<SRC>/lib/demo-data.ts` is a full example with invented data (`lib/demo-sim.ts` is the demo-only simulation; do not copy it).
 

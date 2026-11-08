@@ -67,6 +67,9 @@ The full list with triggers is in [`skill/SKILL.md`](skill/SKILL.md#ui-states-re
 - **History** (this fork): one searchable, full-height panel with every bot event and every request you sent, grouped by
   day and filterable by team. The real app keeps an archive in your private Blob, so events stay after each refresh
   (newest 2000, 90 days). Open it from **History** in the top bar, the LIVE bar, **F**, or **🕘 Full history** in a room.
+- **Grok avatars** (this fork): every bot can look like its avatar in the Grok Bot app (exact colour; circle, rounded
+  square, triangle, "house" or star). Set once per bot family in `AVATARS` (SKILL section 11); "Data Bot" covers
+  "Data Bot - Team", "Data Bot - Ryan" and later ones. Used in the 3D campus, the rooms and every list.
 - **Approvals tray**: approve, reject or ask about any pending item; queue several and send them
   together. In the real app they go to the main bot through a webhook; in the demo a browser-only simulation plays the team's reply (nothing is sent anywhere).
 - **Live feed and HUD**: in-progress list, approvals window, usage %, next routines, "what changed

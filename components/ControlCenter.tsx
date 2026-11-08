@@ -46,8 +46,80 @@ type Team = {
 type Routine = { id: string; owner: string; name: string; schedule: string; state: "on" | "paused" | "unknown"; lastRun?: string; lastResult?: "ok" | "fail"; next?: string; perWeek?: number; note?: string };
 
 let TEAMS: Team[] = [];
-export type DataShape = { UPDATED: string; USAGE: Usage; TEAMS: Team[] };
+// AVATARS (optional): each bot's look in the Grok Bot app, keyed by bot name OR family name (the part before " - ").
+//   { "Captain America": { color: "#ff263c", shape: "pentagon" }, "Grok Bot": { color: "#ffffff", shape: "circle", badge: "#299fff" } }
+//   Inheritance: "Captain America" covers "Captain America - Team", "Captain America - Ryan" and any later
+//   "Captain America - …"; an entry for one sibling ("Data Bot - Team") also covers the others ("Data Bot - Ryan").
+//   Bots with no entry keep the default look (team colours, seed shapes). The server keeps AVATARS across pushes.
+export type AvatarShape = "circle" | "squircle" | "triangle" | "pentagon" | "star";
+export type Avatar = { color: string; shape?: AvatarShape; badge?: string };
+let AVATARS: Record<string, Avatar> = {};
+export type DataShape = { UPDATED: string; USAGE: Usage; TEAMS: Team[]; AVATARS?: Record<string, Avatar> };
 // ===== END DATA =====
+
+// ---- avatars: resolve a bot name to its Grok look (exact name → family → a sibling's entry) ----
+const AV_SHAPES: AvatarShape[] = ["circle", "squircle", "triangle", "pentagon", "star"];
+const okHex = (c: any) => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c.trim());
+const familyOf = (n: string) => n.split(/\s+[-–—|]\s+/)[0].trim().toLowerCase();
+function cleanAv(a: any): Avatar | null {
+  if (!a || !okHex(a.color)) return null;
+  return { color: a.color.trim().toLowerCase(), shape: AV_SHAPES.includes(a.shape) ? a.shape : undefined, badge: okHex(a.badge) ? a.badge.trim().toLowerCase() : undefined };
+}
+let avIdx: { src: any; exact: Map<string, Avatar>; fam: Map<string, Avatar> } | null = null;
+function avatarFor(name: string | undefined | null): Avatar | null {
+  if (!name) return null;
+  if (!avIdx || avIdx.src !== AVATARS) {
+    const exact = new Map<string, Avatar>(), fam = new Map<string, Avatar>(), sib = new Map<string, Avatar>();
+    Object.keys(AVATARS || {}).forEach((k) => {
+      const av = cleanAv((AVATARS as any)[k]); if (!av) return;
+      const key = k.trim().toLowerCase(), f = familyOf(k);
+      exact.set(key, av);
+      if (f === key) fam.set(f, av); else if (!sib.has(f)) sib.set(f, av);
+    });
+    sib.forEach((av, f) => { if (!fam.has(f)) fam.set(f, av); });
+    avIdx = { src: AVATARS, exact, fam };
+  }
+  const key = name.trim().toLowerCase();
+  return avIdx.exact.get(key) || avIdx.fam.get(familyOf(name)) || null;
+}
+// a short string of every resolved avatar, so the 3D scene rebuilds when one changes
+function avatarSig(team: Team): string {
+  return [team.lead, ...team.members].map((m) => { const a = avatarFor(m.name); return a ? `${a.color}${a.shape || ""}${a.badge || ""}` : "-"; }).join(",");
+}
+// outline of a shape in unit space (x and y in −1…1, y up), as M/L/Q segments; shared by SVG and WebGL
+type Seg = ["M" | "L", number, number] | ["Q", number, number, number, number];
+function roundedPoly(pts: [number, number][], r: number): Seg[] {
+  const n = pts.length, out: Seg[] = [];
+  const cut = (a: [number, number], b: [number, number]) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, d = Math.min(r, L / 2); return [a[0] + (dx / L) * d, a[1] + (dy / L) * d] as [number, number]; };
+  for (let i = 0; i < n; i++) {
+    const v = pts[i], a = cut(v, pts[(i + n - 1) % n]), b = cut(v, pts[(i + 1) % n]);
+    out.push(i === 0 ? ["M", a[0], a[1]] : ["L", a[0], a[1]]);
+    out.push(["Q", v[0], v[1], b[0], b[1]]);
+  }
+  return out;
+}
+function shapeOutline(shape: AvatarShape): Seg[] {
+  if (shape === "squircle") return roundedPoly([[-1, -1], [1, -1], [1, 1], [-1, 1]], 0.62);
+  if (shape === "triangle") return roundedPoly([[-1.05, -1], [1.05, -1], [-0.05, 1.05]], 0.5);
+  if (shape === "pentagon") return roundedPoly([[-1, -1], [1, -1], [1, 0.22], [0.08, 1.12], [-1, 0.22]], 0.36);
+  if (shape === "star") { // six soft points
+    const pts: Seg[] = [];
+    for (let k = 0; k <= 72; k++) { const a = (k / 72) * Math.PI * 2 + Math.PI / 2; const r = 0.84 + 0.17 * Math.cos(6 * (a - Math.PI / 2)); pts.push([k ? "L" : "M", Math.cos(a) * r, Math.sin(a) * r]); }
+    return pts;
+  }
+  const pts: Seg[] = []; // circle
+  for (let k = 0; k <= 48; k++) { const a = (k / 48) * Math.PI * 2; pts.push([k ? "L" : "M", Math.cos(a), Math.sin(a)]); }
+  return pts;
+}
+// Grok's shapes are drawn with a slight playful tilt
+const SHAPE_TILT: Record<AvatarShape, number> = { circle: 0, squircle: -7, triangle: -9, pentagon: -10, star: 8 };
+// eye height as a share of the body height (narrow tops need lower eyes)
+const SHAPE_EYE: Record<AvatarShape, number> = { circle: 0.58, squircle: 0.6, triangle: 0.42, pentagon: 0.55, star: 0.56 };
+// SVG path for a body of width w and height h standing on y = 0 (SVG y points down)
+function shapePathSvg(shape: AvatarShape, w: number, h: number): string {
+  const X = (x: number) => (x * w / 2).toFixed(2), Y = (y: number) => (-(y + 1) * h / 2).toFixed(2);
+  return shapeOutline(shape).map((s) => s[0] === "Q" ? `Q ${X(s[1])} ${Y(s[2])} ${X(s[3])} ${Y(s[4])}` : `${s[0]} ${X(s[1])} ${Y(s[2])}`).join(" ") + " Z";
+}
 
 const STATUS_LABEL: Record<TeamStatus, string> = { active: "Active", partial: "Partly active", hold: "Waiting for you", frozen: "Frozen" };
 const STATE_LABEL = { todo: "To do", doing: "In progress", done: "Done" };
@@ -293,7 +365,7 @@ function QuickCmds(props: { team: Team; owner: Member; isLead: boolean; onSend: 
 }
 
 // ---------- character ----------
-function Dude(props: { x: number; y: number; t: number; seed: number; color: string; label: string; s?: number; lead?: boolean; asleep?: boolean; typing?: boolean; walking?: boolean; alert?: boolean }) {
+function Dude(props: { x: number; y: number; t: number; seed: number; color: string; label: string; s?: number; lead?: boolean; asleep?: boolean; typing?: boolean; walking?: boolean; alert?: boolean; name?: string }) {
   // flat "blob with two dots for eyes" character (Grok Bot style)
   const th = useGrokTheme();
   const { t, seed } = props;
@@ -302,16 +374,20 @@ function Dude(props: { x: number; y: number; t: number; seed: number; color: str
   const tap = (Math.sin(t * 16 + seed * 2) > 0 ? 1.5 : -1.5) * s;
   const step = Math.sin(t * 12 + seed) * 3 * s;
   const shape = Math.abs(seed) % 3;
-  const c = props.color;
+  const av = avatarFor(props.name);
+  const avShape = av && av.shape;
+  const c = av ? av.color : props.color;
   const op = props.asleep ? 0.45 : 1;
   const blink = !props.asleep && ((t + seed * 0.7) % 4.2) < 0.12;
   const look = props.walking ? 1.2 : Math.sin(t * 0.7 + seed) * 1.2;
-  const body = shape === 0
+  const body = avShape
+    ? <g opacity={op} transform={`translate(0 ${11 * s}) rotate(${SHAPE_TILT[avShape]} 0 ${-13 * s})`}><path d={shapePathSvg(avShape, 25 * s, 26 * s)} fill={c} />{av!.badge && <circle cx={9.5 * s} cy={-4 * s} r={4.4 * s} fill={av!.badge} stroke="#141414" strokeWidth={1.2 * s} />}</g>
+    : shape === 0
     ? <rect x={-12 * s} y={-15 * s} width={24 * s} height={26 * s} rx={9 * s} fill={c} opacity={op} transform={`rotate(${seed % 2 ? -8 : 7} 0 ${-2 * s})`} />
     : shape === 1
       ? <g fill={c} opacity={op}><circle cx={-5 * s} cy={-6 * s} r={7.5 * s} /><circle cx={5 * s} cy={-7 * s} r={7.5 * s} /><circle cx={8 * s} cy={2 * s} r={7 * s} /><circle cx={-7 * s} cy={3 * s} r={7 * s} /><circle cx={0} cy={4 * s} r={8 * s} /></g>
       : <path d={`M ${-11 * s} ${-2 * s} C ${-12 * s} ${-12 * s} ${-2 * s} ${-16 * s} ${4 * s} ${-14 * s} C ${11 * s} ${-12 * s} ${12 * s} ${-5 * s} ${11 * s} ${2 * s} C ${10 * s} ${10 * s} ${3 * s} ${12 * s} ${-3 * s} ${11 * s} C ${-9 * s} ${10 * s} ${-10 * s} ${6 * s} ${-11 * s} ${-2 * s} Z`} fill={c} opacity={op} />;
-  const eyeY = -4 * s, ex = 4.6 * s;
+  const eyeY = avShape ? (11 - 26 * SHAPE_EYE[avShape]) * s : -4 * s, ex = 4.6 * s;
   return (
     <g transform={`translate(${props.x} ${props.y + bob})`} style={{ pointerEvents: "none" }}>
       <ellipse cx={0} cy={16 * s} rx={12 * s} ry={3.5 * s} fill="#000" opacity={0.25} />
@@ -396,8 +472,8 @@ function Pod(props: { team: Team; idx: number; c: { x: number; y: number }; t: n
             <rect x={mx(i) - 13 * sc} y={rowY + 25 * sc} width={26 * sc} height={6 * sc} rx={2} fill={frozen ? th.text.tertiary : th.fill.accent} opacity={frozen ? 0.3 : flick} />
           </g>
         ))}
-        <Dude x={0} y={leadY} t={t} seed={props.idx * 7 + 1} color={cats[props.idx % cats.length]} label={initials(team.lead.name)} s={sc} lead asleep={frozen} typing alert={count > 0} />
-        {team.members.map((m, i) => <Dude key={m.name} x={mx(i)} y={rowY} t={t} seed={props.idx * 7 + i + 2} color={cats[(props.idx + i + 1) % cats.length]} label={initials(m.name)} s={sc} asleep={frozen} typing />)}
+        <Dude x={0} y={leadY} t={t} seed={props.idx * 7 + 1} color={cats[props.idx % cats.length]} label={initials(team.lead.name)} name={team.lead.name} s={sc} lead asleep={frozen} typing alert={count > 0} />
+        {team.members.map((m, i) => <Dude key={m.name} x={mx(i)} y={rowY} t={t} seed={props.idx * 7 + i + 2} color={cats[(props.idx + i + 1) % cats.length]} label={initials(m.name)} name={m.name} s={sc} asleep={frozen} typing />)}
         {frozen && <rect x={-w / 2} y={-h / 2} width={w} height={h} rx={70} fill={th.kind === "dark" ? th.bg.base : th.text.primary} opacity={th.kind === "dark" ? 0.55 : 0.32} />}
         {rOn + rOff > 0 && (
           <g transform={`translate(0 ${h / 2 - 2})`}>
@@ -577,7 +653,7 @@ function OldListRoom(props: { team: Team; idx: number; t: number; onExit: () => 
                 <g key={p.name}>
                   <rect x={x - 60} y={140} width={120} height={34} rx={8} fill={th.fill.secondary} stroke={th.border.default} />
                   <rect x={x - 22} y={156} width={44} height={8} rx={2} fill={frozen ? th.text.tertiary : th.fill.accent} opacity={frozen ? 0.3 : 0.55 + 0.25 * Math.sin(t * 3 + i)} />
-                  <Dude x={x} y={122} t={t} seed={props.idx * 7 + i + 1} color={cats[(props.idx + i) % cats.length]} label={initials(p.name)} s={1.5} lead={isLead} asleep={frozen} typing />
+                  <Dude x={x} y={122} t={t} seed={props.idx * 7 + i + 1} color={cats[(props.idx + i) % cats.length]} label={initials(p.name)} name={p.name} s={1.5} lead={isLead} asleep={frozen} typing />
                   <text x={x} y={193} textAnchor="middle" direction="ltr" fontSize={13} fill={th.text.secondary}>{p.name}</text>
                   {txt && (
                     <g transform={`translate(${x} ${48 + Math.sin(t * 1.5 + i) * 2})`}>
@@ -988,7 +1064,7 @@ function Room(props: { team: Team; idx: number; t: number; onExit: () => void; d
       <ellipse cx={D.x} cy={D.y + 70} rx={D.w * 0.95} ry={70} fill={cats[(props.idx + 3) % cats.length]} opacity={0.12} />
       {undecided > 0 && lit && <ellipse cx={D.x} cy={D.y + 46} rx={D.w * 0.66 + pulse * 16} ry={42 + pulse * 6} fill="none" stroke={th.text.warning} strokeWidth={4} opacity={0.35 + 0.35 * pulse} />}
       <g {...hit(team.lead.name, D.x, D.y - 120 * L.cs / 2.1, () => setPop({ kind: "person", i: 0 }))}>
-        <Dude x={D.x} y={D.y - 62} t={t} seed={props.idx * 7 + 1} color={lc} label={initials(team.lead.name)} s={L.cs} lead asleep={frozen} typing alert={undecided > 0} />
+        <Dude x={D.x} y={D.y - 62} t={t} seed={props.idx * 7 + 1} color={lc} label={initials(team.lead.name)} name={team.lead.name} s={L.cs} lead asleep={frozen} typing alert={undecided > 0} />
         <circle cx={D.x} cy={D.y - 74} r={34} fill="transparent" />
       </g>
       <polygon points={`${D.x - D.w / 2 + 26},${D.y - 44} ${D.x + D.w / 2 - 26},${D.y - 44} ${D.x + D.w / 2},${D.y} ${D.x - D.w / 2},${D.y}`} fill={th.bg.elevated} stroke={th.border.strong} strokeWidth={2.5} />
@@ -1027,7 +1103,7 @@ function Room(props: { team: Team; idx: number; t: number; onExit: () => void; d
     return (
       <g key={m.name}>
         <g {...hit(`${m.name} · ${m.role}`, p.x, p.y - 140, () => setPop({ kind: "person", i: i + 1 }))}>
-          <Dude x={p.x} y={p.y - 52} t={t} seed={props.idx * 7 + i + 2} color={cats[(props.idx + i + 1) % cats.length]} label={initials(m.name)} s={s} asleep={frozen} typing />
+          <Dude x={p.x} y={p.y - 52} t={t} seed={props.idx * 7 + i + 2} color={cats[(props.idx + i + 1) % cats.length]} label={initials(m.name)} name={m.name} s={s} asleep={frozen} typing />
           <circle cx={p.x} cy={p.y - 64} r={32} fill="transparent" />
           <polygon points={`${p.x - dw / 2 + 16},${p.y - 30} ${p.x + dw / 2 - 16},${p.y - 30} ${p.x + dw / 2},${p.y} ${p.x - dw / 2},${p.y}`} fill={th.bg.elevated} stroke={th.border.strong} strokeWidth={2} />
           <rect x={p.x - dw / 2} y={p.y} width={dw} height={42} rx={4} fill={th.fill.secondary} stroke={th.border.strong} strokeWidth={2} />
@@ -1426,7 +1502,7 @@ function WorkItem(props: { row: WorkRow; t: number; k: number; onEnter: () => vo
   return (
     <button onClick={props.onEnter} style={{ display: "flex", gap: 8, alignItems: "flex-start", width: "100%", textAlign: "start", font: "inherit", cursor: "pointer", background: th.bg.elevated, border: `1px solid ${th.border.subtle}`, borderRadius: 16, padding: "8px 10px 9px", boxShadow: "0 3px 10px rgba(0,0,0,.07)", color: th.text.primary, position: "relative", overflow: "hidden" }}>
       <svg width={34} height={40} viewBox="-17 -24 34 44" style={{ flex: "none" }}>
-        {row.kind === "routine" ? <g transform="translate(0 -2)"><Clock r={13} t={t} mode="on" /></g> : <Dude x={0} y={0} t={t} seed={props.k * 5 + row.idx} color={c} label={initials(row.owner)} s={0.9} typing />}
+        {row.kind === "routine" ? <g transform="translate(0 -2)"><Clock r={13} t={t} mode="on" /></g> : <Dude x={0} y={0} t={t} seed={props.k * 5 + row.idx} color={c} label={initials(row.owner)} name={row.owner} s={0.9} typing />}
       </svg>
       <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
         <span style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -1947,7 +2023,7 @@ function IsoCampus(props: SceneProps) {
     ags.forEach((a, k) => {
       const ax = c.x + a.x, az = c.z + a.z;
       const b = P(ax, 0.1, az);
-      dr.push({ d: b[2] + 0.02, l: 2, el: <IsoBlob key={"ag" + tm.id + k} x={b[0]} y={b[1]} s={zoom * 0.0185 * (a.lead ? 1.15 : 1)} t={t} seed={idx * 7 + k} ci={a.ci} color={cats[a.ci % cats.length]} state={a.state} lead={a.lead} alert={a.alert} op={op} ev={evFor({ team: tm.id, what: "person", member: a.i })} /> });
+      dr.push({ d: b[2] + 0.02, l: 2, el: <IsoBlob key={"ag" + tm.id + k} x={b[0]} y={b[1]} s={zoom * 0.0185 * (a.lead ? 1.15 : 1)} t={t} seed={idx * 7 + k} ci={a.ci} color={cats[a.ci % cats.length]} name={a.name} state={a.state} lead={a.lead} alert={a.alert} op={op} ev={evFor({ team: tm.id, what: "person", member: a.i })} /> });
     });
     // sign above the room
     const sp = P(c.x, (fz ? 0.8 : 1.05) + 0.55, z0);
@@ -2036,7 +2112,7 @@ function IsoCampus(props: SceneProps) {
 }
 
 // a 3D-shaded blob character (billboard), anchored at its feet
-function IsoBlob(props: { x: number; y: number; s: number; t: number; seed: number; ci: number; color: string; state: "type" | "idle" | "sleep" | "walk"; lead?: boolean; alert?: boolean; op?: number; ev?: any }) {
+function IsoBlob(props: { x: number; y: number; s: number; t: number; seed: number; ci: number; color: string; state: "type" | "idle" | "sleep" | "walk"; lead?: boolean; alert?: boolean; op?: number; ev?: any; name?: string }) {
   const th = useGrokTheme();
   const { s, t, seed } = props;
   const sleep = props.state === "sleep", walk = props.state === "walk", typing = props.state === "type";
@@ -2045,22 +2121,30 @@ function IsoBlob(props: { x: number; y: number; s: number; t: number; seed: numb
   const blink = !sleep && ((t + seed * 0.7) % 4.2) < 0.12;
   const look = walk ? 1.4 : Math.sin(t * 0.7 + seed) * 1.6;
   const shape = Math.abs(seed) % 3;
-  const fill = `url(#isoB${props.ci % 6})`;
+  const av = avatarFor(props.name);
+  const col = av ? av.color : props.color;
+  const gid = av ? "avB" + av.color.slice(1) : "";
+  const fill = av ? `url(#${gid})` : `url(#isoB${props.ci % 6})`;
   const H = 27 * sq;
-  const body = shape === 0
+  const avShape = av && av.shape;
+  const body = avShape
+    ? <path d={shapePathSvg(avShape, 26, H)} fill={fill} transform={`rotate(${SHAPE_TILT[avShape]} 0 ${-H / 2})`} />
+    : shape === 0
     ? <ellipse cx={0} cy={-H / 2} rx={12.5} ry={H / 2} fill={fill} />
     : shape === 1
       ? <rect x={-12} y={-H} width={24} height={H} rx={10} fill={fill} />
       : <path d={`M -12 ${-H * 0.45} C -12 ${-H * 1.02} 12 ${-H * 1.08} 12.5 ${-H * 0.5} C 13 ${-H * 0.05} 7 0 0 0 C -8 0 -12 ${-H * 0.08} -12 ${-H * 0.45} Z`} fill={fill} />;
   const tap = Math.sin(t * 16 + seed * 2) > 0 ? 1.4 : -1.4;
-  const ey = -H * 0.62;
+  const ey = -H * (avShape ? SHAPE_EYE[avShape] : 0.62);
   return (
     <g transform={`translate(${props.x.toFixed(1)} ${(props.y + bob).toFixed(1)}) scale(${s.toFixed(3)})`} opacity={(props.op === undefined ? 1 : props.op) * (sleep ? 0.6 : 1)} {...(props.ev || { style: { pointerEvents: "none" } })}>
+      {av && <defs><radialGradient id={gid} cx="35%" cy="28%" r="80%"><stop offset="0%" stopColor={hexMix(av.color, 0.55, "#ffffff")} /><stop offset="45%" stopColor={av.color} /><stop offset="100%" stopColor={hexMix(av.color, 0.55)} /></radialGradient></defs>}
       <ellipse cx={0} cy={0} rx={13} ry={4} fill="#000" opacity={0.35} />
-      {walk && <g><ellipse cx={-5} cy={-1 + Math.sin(t * 12 + seed) * 2} rx={3.4} ry={3} fill={props.color} /><ellipse cx={5} cy={-1 - Math.sin(t * 12 + seed) * 2} rx={3.4} ry={3} fill={props.color} /></g>}
+      {walk && <g><ellipse cx={-5} cy={-1 + Math.sin(t * 12 + seed) * 2} rx={3.4} ry={3} fill={col} /><ellipse cx={5} cy={-1 - Math.sin(t * 12 + seed) * 2} rx={3.4} ry={3} fill={col} /></g>}
       {body}
       <ellipse cx={-4.5} cy={-H * 0.8} rx={4} ry={2.6} fill="#ffffff" opacity={0.28} />
-      {typing && <g><circle cx={-10} cy={-6 + tap} r={3} fill={props.color} /><circle cx={10} cy={-6 - tap} r={3} fill={props.color} /></g>}
+      {av && av.badge && <circle cx={9.5} cy={-4.5} r={4.4} fill={av.badge} stroke="#141414" strokeWidth={1.3} />}
+      {typing && <g><circle cx={-10} cy={-6 + tap} r={3} fill={col} /><circle cx={10} cy={-6 - tap} r={3} fill={col} /></g>}
       {sleep
         ? <g stroke="#141414" strokeWidth={1.7} strokeLinecap="round"><line x1={-7.5 + look * 0.3} y1={ey} x2={-3 + look * 0.3} y2={ey} /><line x1={3 + look * 0.3} y1={ey} x2={7.5 + look * 0.3} y2={ey} /></g>
         : <g fill="#141414"><ellipse cx={-4.6 + look} cy={ey} rx={2.3} ry={blink ? 0.4 : 3.1} /><ellipse cx={4.6 + look} cy={ey} rx={2.3} ry={blink ? 0.4 : 3.1} /><circle cx={-4 + look} cy={ey - 1.2} r={0.8} fill="#ffffff" opacity={blink ? 0 : 0.9} /><circle cx={5.2 + look} cy={ey - 1.2} r={0.8} fill="#ffffff" opacity={blink ? 0 : 0.9} /></g>}
@@ -2118,7 +2202,7 @@ function RoomPanel(props: { team: Team; idx: number; t: number; tab: PanelTab; m
       return (
         <div key={m.name} style={{ marginBottom: 8, borderRadius: 16, background: th.bg.base, border: `1px solid ${sel ? th.fill.accent : th.border.subtle}`, overflow: "hidden" }}>
           <button onClick={() => props.onMember(sel ? null : i)} style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", textAlign: "start", font: "inherit", padding: "8px 10px", background: "none", border: "none", cursor: "pointer", color: th.text.primary }}>
-            <svg width={34} height={38} viewBox="-17 -34 34 38" style={{ flex: "none" }}><defs>{cats.map((cc: string, q: number) => <radialGradient key={q} id={"isoB" + q} cx="35%" cy="28%" r="80%"><stop offset="0%" stopColor={hexMix(cc, 0.55, "#ffffff")} /><stop offset="45%" stopColor={cc} /><stop offset="100%" stopColor={hexMix(cc, 0.55)} /></radialGradient>)}</defs><IsoBlob x={0} y={0} s={1} t={t} seed={idx * 7 + j} ci={ci} color={cats[ci % cats.length]} state={fz ? "sleep" : dn.length ? "type" : "idle"} lead={j === 0} /></svg>
+            <svg width={34} height={38} viewBox="-17 -34 34 38" style={{ flex: "none" }}><defs>{cats.map((cc: string, q: number) => <radialGradient key={q} id={"isoB" + q} cx="35%" cy="28%" r="80%"><stop offset="0%" stopColor={hexMix(cc, 0.55, "#ffffff")} /><stop offset="45%" stopColor={cc} /><stop offset="100%" stopColor={hexMix(cc, 0.55)} /></radialGradient>)}</defs><IsoBlob x={0} y={0} s={1} t={t} seed={idx * 7 + j} ci={ci} color={cats[ci % cats.length]} name={m.name} state={fz ? "sleep" : dn.length ? "type" : "idle"} lead={j === 0} /></svg>
             <span style={{ flex: 1, minWidth: 0 }}>
               <b style={{ fontSize: 14 }}>{m.name}</b>{j === 0 && <span style={{ fontSize: 11, color: th.text.warning }}> · team lead</span>}
               <span style={{ display: "block", fontSize: 12, color: th.text.tertiary }}>{m.role}</span>
@@ -2535,10 +2619,10 @@ function Room3D(props: { team: Team; idx: number; t: number; vp: { w: number; h:
   // ---- the lead's desk in the middle: inbox tray (approvals), monitor, lamp above, rug below ----
   const zl = portrait ? -G.D * 0.18 : -G.D * 0.1;
   const ldW = portrait ? 300 : 330, ldH = 92, ldD = 120;
-  const blob = (k: string, x: number, y: number, z: number, j: number, ci: number, lead: boolean, alert: boolean, st: "type" | "idle" | "sleep", sc: number, onClick: () => void) =>
+  const blob = (k: string, x: number, y: number, z: number, j: number, ci: number, lead: boolean, alert: boolean, st: "type" | "idle" | "sleep", sc: number, onClick: () => void, name?: string) =>
     billboard(k, x, y, z, 120 * sc, 150 * sc, (
       <svg width={120 * sc} height={150 * sc} viewBox="-60 -140 120 150" style={{ overflow: "visible" }}>
-        <g transform="scale(2.4)"><IsoBlob x={0} y={-4} s={1} t={t} seed={idx * 7 + j} ci={ci} color={cats[ci % cats.length]} state={st} lead={lead} alert={alert} /></g>
+        <g transform="scale(2.4)"><IsoBlob x={0} y={-4} s={1} t={t} seed={idx * 7 + j} ci={ci} color={cats[ci % cats.length]} state={st} lead={lead} alert={alert} name={name} /></g>
       </svg>
     ), () => { if (!dragged.current) onClick(); });
   const people = ownersOf(team);
@@ -2629,7 +2713,7 @@ function Room3D(props: { team: Team; idx: number; t: number; vp: { w: number; h:
         {block("md" + i, s.x, 0, s.z, mdW, mdH, mdD, wood,
           <div onClick={() => { if (!dragged.current) props.onMember(on ? null : i); }} style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><span style={{ fontSize: 18, fontWeight: 700, color: on ? th.text.accent : th.text.secondary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: mdW - 12 }}>{m.name}</span></div>)}
         {monitor("mm" + i, s.x + mdW * 0.26, -mdH, s.z + 4, 58, 36, ci, !!dn && !fz)}
-        {blob("mb" + i, s.x, -mdH + 6, s.z - mdD * 0.62, i + 1, ci, false, false, fz ? "sleep" : dn ? "type" : "idle", 0.85, () => props.onMember(on ? null : i))}
+        {blob("mb" + i, s.x, -mdH + 6, s.z - mdD * 0.62, i + 1, ci, false, false, fz ? "sleep" : dn ? "type" : "idle", 0.85, () => props.onMember(on ? null : i), m.name)}
       </div>
     );
   });
@@ -2655,7 +2739,7 @@ function Room3D(props: { team: Team; idx: number; t: number; vp: { w: number; h:
   const zOp = props.focus ? zk : 1 - zk;
   const zw = Math.min(1180, vp.w - (phone ? 16 : 80)), zh = vp.h - topY - botH - 16;
   const navBtn: any = { font: "inherit", fontSize: 13, fontWeight: 600, padding: phone ? "8px 10px" : "8px 14px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: th.bg.elevated, color: th.text.primary, cursor: "pointer", whiteSpace: "nowrap", boxShadow: "0 6px 18px rgba(0,0,0,.3)" };
-  const leadBlob = blob("lb", 0, -ldH + 4, zl - ldD * 0.68, 0, idx % 6, true, open > 0 && !fz, fz ? "sleep" : leadDn || team.tasks.some((x) => x.state === "doing") ? "type" : "idle", 1.05, () => props.onMember(props.member === -1 ? null : -1));
+  const leadBlob = blob("lb", 0, -ldH + 4, zl - ldD * 0.68, 0, idx % 6, true, open > 0 && !fz, fz ? "sleep" : leadDn || team.tasks.some((x) => x.state === "doing") ? "type" : "idle", 1.05, () => props.onMember(props.member === -1 ? null : -1), team.lead.name);
   return (
     <div ref={box} dir="ltr" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onPointerLeave={onUp} onDoubleClick={() => setOrbit({ yaw: 0, pitch: 0 })}
       style={{ position: "absolute", inset: 0, overflow: "hidden", background: `radial-gradient(ellipse at 50% 40%, #1b1b1d, ${th.bg.base} 75%)`, touchAction: "pan-y", userSelect: dragged.current ? "none" : "auto", zIndex: 4, perspective: P, perspectiveOrigin: `${ox}px ${oy}px` } as any}>
@@ -3592,7 +3676,7 @@ export default function ControlCenter(props: { initial: DataShape; demo?: DemoAp
     if (left > 0) await new Promise((r) => setTimeout(r, left));
     busyRef.current = false; setBusy(false);
   };
-  UPDATED = data.UPDATED; USAGE = data.USAGE; TEAMS = data.TEAMS;
+  UPDATED = data.UPDATED; USAGE = data.USAGE; TEAMS = data.TEAMS; AVATARS = data.AVATARS && typeof data.AVATARS === "object" ? data.AVATARS : {};
   RF = { busy, at, result, reqAt, polling: pollUntil > 0, refresh, note };
   DEMO = demo;
   if (!mounted) return <div style={{ height: "100dvh", background: "#141414" }} />;
@@ -3600,4 +3684,4 @@ export default function ControlCenter(props: { initial: DataShape; demo?: DemoAp
 }
 
 // shared with the WebGL scene
-export { roomGeo, agentsOf, W3, ctrlFor, qpt, PLAZA, TREES, hexMix, campusGrow };
+export { roomGeo, agentsOf, W3, ctrlFor, qpt, PLAZA, TREES, hexMix, campusGrow, avatarFor, avatarSig, shapeOutline, SHAPE_TILT, SHAPE_EYE };
