@@ -172,7 +172,7 @@ const TREES = [
 // ---- data refresh: the web app fills RF (instant re-read of the latest data); on the canvas the button just re-reads the clock ----
 type RefreshApi = { busy: boolean; at: number; result: "" | "new" | "same" | "error"; reqAt: number; polling: boolean; refresh: () => void; note?: string };
 // demo only (components/DemoApp.tsx): a client-side simulation of the bot; null in the real app
-type DemoApi = { snapshot: () => DataShape; send: (items: string[]) => void; refreshRound: () => void; subscribe: (fn: () => void) => () => void; chats?: () => any[] };
+type DemoApi = { snapshot: () => DataShape; send: (items: string[]) => void; refreshRound: () => void; subscribe: (fn: () => void) => () => void; chats?: () => any[]; sendChat?: (chat: string, from: string, text: string) => void };
 let DEMO: DemoApi | null = null;
 // "3.11.2026, 08:06 (…)" → "08:06" today, or "2.11 08:06" for an older day
 const dataStamp = (u: string) => {
@@ -2932,6 +2932,18 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
   const [hl, setHl] = useState<string | null>(null);
   const [wide, setWide] = useState<Record<string, boolean>>({});
   const [seen, setSeen] = useState<Record<string, string> | null>(null);
+  // composer: the sender's name is asked once per browser (the bots and the team see it)
+  const [me, setMe] = useState("");
+  const [meDraft, setMeDraft] = useState("");
+  const [askMe, setAskMe] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendErr, setSendErr] = useState("");
+  const [fast, setFast] = useState(0); // poll every few seconds until this time (waiting for a reply)
+  const ta = useRef<any>(null);
+  const sentAt = useRef(0);
+  useEffect(() => { try { setMe(localStorage.getItem("ccName") || ""); } catch (e) {} }, []);
+  const saveMe = () => { const n = meDraft.trim().slice(0, 40); if (!n) return; setMe(n); setAskMe(false); try { localStorage.setItem("ccName", n); } catch (e) {} };
   const box = useRef<any>(null);
   const stick = useRef(true);
   const reqN = useRef(0);
@@ -2974,6 +2986,42 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
     const id = setInterval(async () => { const n = reqN.current; try { const r = await loadChatMsgs(sel); if (n === reqN.current) setMsgs((m) => mergeMsgs(m, r.messages)); } catch (e) {} }, 60000);
     return () => clearInterval(id);
   }, [props.open, sel]);
+  // after sending: check every 6 s for the reply, for 3 minutes
+  useEffect(() => {
+    if (!sel || fast < Date.now()) return;
+    const id = setInterval(async () => {
+      if (Date.now() > fast) { setFast(0); return; }
+      const n = reqN.current;
+      try {
+        const r = await loadChatMsgs(sel);
+        if (n === reqN.current) {
+          setMsgs((m) => mergeMsgs(m, r.messages));
+          if (r.messages.some((x) => x.role !== "user" && atMs(x.at) >= sentAt.current)) setFast(0); // the reply is in
+        }
+      } catch (e) {}
+      refresh();
+    }, 6000);
+    return () => clearInterval(id);
+  }, [fast, sel]);
+  const sendMsg = async () => {
+    const text = draft.trim(); const c = chats && sel ? chats.find((x) => x.id === sel) : undefined;
+    if (!text || !c || sending) return;
+    if (!me) { setAskMe(true); return; }
+    setSending(true); setSendErr("");
+    try {
+      if (DEMO) { const d: any = DEMO; if (d.sendChat) d.sendChat(c.id, me, text); }
+      else {
+        const r = await fetch("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "chat", chat: c.id, from: me, text }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || "Error " + r.status);
+        if (j.message) setMsgs((m) => mergeMsgs(m, [j.message]));
+      }
+      setDraft(""); if (ta.current) ta.current.style.height = "";
+      stick.current = true; sentAt.current = Date.now() - 1000; setFast(Date.now() + 3 * 60000);
+      const r2 = await loadChatMsgs(c.id); setMsgs((m) => mergeMsgs(m, r2.messages)); refresh();
+    } catch (e: any) { setSendErr((e && e.message) || "Couldn't send"); }
+    setSending(false);
+  };
   // first open on a wide screen: show the most recent chat
   useEffect(() => { if (props.open && props.visible && !sel && !props.phone && chats && chats.length && !props.focus) openChat(chats[0].id); }, [props.open, props.visible, chats]);
   // "Chat history" on a bot: its direct chat, else its family's, else its team's group chat
@@ -3109,6 +3157,7 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
                               {isHl ? mark(m.text) : long && !expanded ? m.text.slice(0, 1400) + "…" : m.text}
                               {long && !isHl && <button onClick={() => setWide({ ...wide, [m.id]: !expanded })} style={{ display: "block", marginTop: 4, font: "inherit", fontSize: 12.5, fontWeight: 700, padding: 0, border: "none", background: "none", color: th.text.accent, cursor: "pointer" }}>{expanded ? "Show less" : "Show more"}</button>}
                             </span>
+                            {m.id.startsWith("cc-") && <span style={{ fontSize: 11, color: th.text.tertiary, marginTop: 2 }}>sent from the control center</span>}
                           </span>
                         </div>
                       )}
@@ -3116,7 +3165,29 @@ function ChatsView(props: { open: boolean; visible: boolean; phone: boolean; idx
                   );
                 })}
               </div>
-              <div style={{ padding: "7px 14px", borderTop: `1px solid ${th.border.weak}`, fontSize: 12, color: th.text.tertiary }}>A copy of this chat from Grok · new messages arrive with each refresh (⟳)</div>
+              <div style={{ padding: "8px 12px 10px", borderTop: `1px solid ${th.border.weak}` }}>
+                {(askMe || !me) && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13, color: th.text.secondary }}>Your name (the bots and your team see it):</span>
+                    <input value={meDraft} onChange={(e) => setMeDraft(e.target.value)} onKeyDown={(e: any) => { if (e.key === "Enter") saveMe(); }} placeholder="e.g. Jacob" style={{ flex: "1 1 120px", minWidth: 0, font: "inherit", fontSize: 14, padding: "6px 10px", borderRadius: 10, border: `1px solid ${askMe ? th.fill.accent : th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none" }} />
+                    <button onClick={saveMe} disabled={!meDraft.trim()} style={{ font: "inherit", fontSize: 13, fontWeight: 700, padding: "6px 12px", borderRadius: 999, border: "none", background: meDraft.trim() ? th.fill.accent : th.fill.secondary, color: th.text.onColor, cursor: meDraft.trim() ? "pointer" : "default" }}>Save</button>
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                  <textarea ref={ta} value={draft} rows={1}
+                    onChange={(e: any) => { setDraft(e.target.value); setSendErr(""); const el = e.target; el.style.height = "auto"; el.style.height = Math.min(150, el.scrollHeight) + "px"; }}
+                    onKeyDown={(e: any) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); } }}
+                    placeholder={meta.kind === "group" ? `Message the ${meta.name} group…` : `Message ${meta.bot || meta.name}…`}
+                    style={{ flex: 1, minWidth: 0, resize: "none", boxSizing: "border-box", minHeight: 42, maxHeight: 150, font: "inherit", fontSize: 14.5, lineHeight: "21px", padding: "10px 12px", borderRadius: 14, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none" }} />
+                  <button onClick={sendMsg} disabled={!draft.trim() || sending} aria-label="Send" style={{ height: 42, padding: "0 16px", borderRadius: 14, border: "none", font: "inherit", fontSize: 14, fontWeight: 700, background: draft.trim() && !sending ? th.fill.accent : th.fill.secondary, color: draft.trim() && !sending ? th.text.onColor : th.text.tertiary, cursor: draft.trim() && !sending ? "pointer" : "default", flex: "none" }}>{sending ? "Sending…" : "Send"}</button>
+                </div>
+                <div style={{ fontSize: 11.5, color: sendErr ? th.text.danger : th.text.tertiary, marginTop: 5 }}>
+                  {sendErr ? `Not sent: ${sendErr}. Your text is still here.` : <>
+                    {me ? <>Sending as <b style={{ color: th.text.secondary }}>{me}</b> <button onClick={() => { setMeDraft(me); setAskMe(true); }} style={{ font: "inherit", fontSize: 11.5, padding: 0, border: "none", background: "none", color: th.text.accent, cursor: "pointer" }}>change</button> · </> : null}
+                    goes through your Grok Bot{fast > Date.now() ? " · waiting for the reply…" : ""}
+                  </>}
+                </div>
+              </div>
             </>
           )}
         </div>

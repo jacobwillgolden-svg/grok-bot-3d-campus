@@ -36,6 +36,8 @@ in your private chat what failed, in one or two sentences, and what you need fro
 > for the first upload, section 7.1 step 6b afterwards). They are stored in the same private Blob, one file per chat
 > (newest 3000 messages), and read through `GET /api/chats` with the same cookie as `/api/data`. The panel's other tab,
 > 📰 Activity, is the activity feed described above.
+> People can also **send** a message from a chat: it is stored at once and reaches you through the webhook (section 8, form C);
+> you pass it on and upload the answer right away. Team group chats are uploaded live, message by message (section 7.5).
 
 The user gives you only that repo link. You download everything yourself (next section) and work only from the downloaded
 files. `<SRC>` below means `~/control-center/src`, the downloaded repo. Every `skill/reference/...` path in this file is inside it.
@@ -60,6 +62,7 @@ against the code yourself before you start; the user decides in section 0 whethe
 - **Who can act:** a button sends a **request** to your webhook routine, signed with a sender key that only the user copies
   from the routine panel to the app's `/setup` page (stored in the private Blob, never sent back to a browser). You decide what to do with it. Anything that publishes, sends outside
   the user's own bots, spends money, deletes, or approves one of those waits for the user's yes in your private chat (section 8).
+  A message typed in the Chats panel is a request too: you pass it on under the same rules (section 8, form C).
 - **Verify it:** MIT license. The private backend is about 380 lines in `skill/reference/`: start with `lib/auth.ts`,
   `app/api/send/route.ts`, `app/api/admin/data/route.ts`, `lib/config.ts` and `scripts/push-data.sh`. The UI in `components/`
   only calls `/api/data` and `/api/send` (`grep -n "fetch(" components/*.tsx`). The public demo uses invented data and sends nothing.
@@ -531,7 +534,7 @@ App folder: <~/control-center/app>. Data file: <~/control-center/data.json>. Tim
    newer than that chat's time in ~/control-center/state/chat_cursor.json (minus 10 minutes of overlap; the server drops
    duplicates). New chats and new bots start from as far back as you can read. Write them to ~/control-center/messages.json
    (skill section 11: id, name, kind, team, bot, participants, messages with at/from/role/text; only message text, no tool
-   calls) and run ./push-messages.sh ~/control-center/messages.json in the app folder. On success, update chat_cursor.json.
+   calls; leave out your own relay messages tagged [cc-…], the page already has the original) and run ./push-messages.sh ~/control-center/messages.json in the app folder. On success, update chat_cursor.json.
    If it fails, keep the old cursors (the next refresh re-sends) and go on with step 7.
 7. Only after step 6's check succeeds: write the time (date -Iseconds) to ~/control-center/state/last_full_refresh and delete ~/control-center/state/dirty_since.
    If the push failed, leave dirty_since in place. The scheduled backup picks it up.
@@ -590,6 +593,26 @@ The page shows the result when that timer runs, about ten minutes after the olde
 
 ---
 
+### 7.5 Chats that go up right away (no refresh needed)
+
+Direct chats with other bots go up with each full refresh (7.1 step 6b), because you only see them by reading transcripts.
+Two kinds of message go up at once instead, each as a small upload: a messages.json holding just that chat and those
+messages, sent with `./push-messages.sh` in the app folder. No full refresh and no data push.
+
+1. **Team group chats, live.** Every message in a team group already gives you a room turn. In that turn, upload the new
+   message(s) to that group's chat (`group:<group id or name>`) and move that chat's time in `state/chat_cursor.json`.
+   Uploading is not speaking: the silence rule (section 2) still holds. Skip your own "(via the control center) … [cc-…]"
+   posts; the page already stored the original.
+2. **Answers to messages sent from the page.** When a bot answers a message you passed on with a `[cc-…]` tag (form C in
+   section 8), or a lead answers one in the group, upload that answer to the chat the tag came from: `role: "bot"`, `from` the
+   bot's exact name, the time it was sent, and the platform message id when you can see one. Your own answers to messages
+   in `dm:main` go up the same way.
+
+The page checks for new messages every minute, and every 6 seconds for 3 minutes after someone sends one, so these show up
+without anyone pressing ⟳.
+
+---
+
 ## 8. The routine prompts (save them exactly, filling `<…>`)
 
 All three refresh paths point to `~/control-center/FULL_REFRESH.md` (section 7.1). None of them messages a team or the user
@@ -637,9 +660,22 @@ B) otherwise text starts "N request(s) from the control center:" followed by num
    - Otherwise remove only a stale timer named in that state file, create one dated one-off routine for that time (name "Control center one-off refresh", schedule M H D MON *, and check the tool labels it Once), and save its routine id and that ISO time in flush_timer (id on the first line, T on the second).
    Creating a dated one-off routine does not normally raise a confirmation card; if one appears, approve it. The next full refresh picks up the change.
 
+C) otherwise text starts "Chat message from the control center [cc-…]", then the lines "From: <name>",
+   "Chat: <chat name> (<group|direct>, id <chat id>)", "To: <bot name | the group …>", a line "---", and the message.
+   It is a message a person on the user's team typed in the control center's Chats panel. It is a REQUEST like a line in
+   B: the same confirm-first and never rules apply to what it asks for (ask the user in the private chat first when they do).
+   - To a bot (a direct chat): SendToAgent to that bot (priority true) with "<From> (via the control center): <message> [cc-…]".
+     When it answers, upload the answer to that chat right away (section 7.5).
+   - To you (chat id dm:main): answer it yourself and upload your answer to dm:main (section 7.5).
+   - To a group: post "<From> (via the control center): <message> [cc-…]" in that group if you can post there; otherwise send
+     it to that team's lead with SendToAgent and ask the lead to answer in the group. Answers go up live (section 7.5).
+   Do not upload the person's message yourself (the page stored it when it was sent), do not edit the data file, and send
+   nothing back to the page.
+
 Results go to: the team leads named in each line, in Grok Bot (1:1 messages, one per lead). Then the user, in the private
 chat, gets ONE short line saying what went to whom, plus the confirm-first message when there is one.
-A refresh (case A) sends the user nothing. When there is nothing to do, send nothing.
+A refresh (case A) sends the user nothing. A chat message (case C) sends the user nothing either, except the confirm-first
+question when it needs one: the answer shows up in the Chats panel. When there is nothing to do, send nothing.
 ```
 
 **One-off timer** ("Control center one-off refresh", one dated run at T, schedule `M H D MON *`, labeled Once, section 7.2):
@@ -832,6 +868,7 @@ type DataShape = {
 | Event timer | one dated one-off, ten minutes after the oldest unflushed change, only when none is already pending and the time is outside quiet hours or days; after the run it deletes itself and `state/flush_timer`. A skipped or failed refresh keeps `state/dirty_since` for the scheduled backup |
 | Client normally | every 60 s and when the tab becomes visible |
 | Session cookie | 60 days; rotating `CONTROL_ACCESS_TOKEN` signs out every device |
+| Chat message from the page | 4000 characters; shares the one-send-per-5-s limit of `POST /api/send`; the target comes from the stored chat list |
 | Chats | newest 3000 messages per chat, 12,000 characters per message; `push-messages.sh` sends batches of at most 400 messages / 1.5 MB; the page loads 300 at a time ("Load older") and checks for new ones every 60 s |
 
 ## 13. Files in `<SRC>/skill/reference/`

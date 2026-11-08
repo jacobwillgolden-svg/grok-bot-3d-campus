@@ -24,8 +24,9 @@ approvals and numbers are all made up, and no button contacts anything.
   **your own** Vercel account.
 - **Who can open it:** only someone with your private link (a random token). Everything else returns 404, and search engines
   are told not to index it. You can add a Vercel login on top for free on any plan (SKILL section 10.1).
-- **Who can act:** buttons send requests to your main bot, signed with a key only you paste in. The bot decides. Anything that
-  publishes, sends outside, spends, deletes or approves one of those, it confirms with you in chat first.
+- **Who can act:** buttons and messages typed in the Chats panel go to your main bot as requests, signed with a key only you
+  paste in. The bot decides and passes chat messages on to the right bot or group. Anything that publishes, sends outside,
+  spends, deletes or approves one of those, it confirms with you in chat first.
 - **What you approve:** a short plan before it starts, the Vercel connection, and a routine card only when a tool raises one.
 - **Verify it:** MIT. The private backend is about 380 lines in [`skill/reference/`](skill/reference/); start with `lib/auth.ts`
   and `app/api/send/route.ts`. This demo uses invented data and sends nothing.
@@ -68,7 +69,9 @@ The full list with triggers is in [`skill/SKILL.md`](skill/SKILL.md#ui-states-re
   scheduled-tasks panel with live countdowns and failure alerts.
 - **💬 Chats** (this fork): your team's conversations with its bots, copied from Grok: every team group chat and every
   bot's direct chat, with a chat list, unread dots, search across all chats, and the bots in their Grok avatars. Open it
-  from **Chats** in the top bar, **C**, or **💬 Chat history** on any bot. New messages arrive with each refresh.
+  from **Chats** in the top bar, **C**, or **💬 Chat history** on any bot. **Send messages from the page too:** they go
+  through your main bot to that bot or group, and the answer shows up in the same chat. Team group chats update live;
+  direct chats with other bots update with each refresh.
 - **History** (this fork): one searchable, full-height panel with every bot event and every request you sent, grouped by
   day and filterable by team. The real app keeps an archive in your private Blob, so events stay after each refresh
   (newest 2000, 90 days). Open it from **History** in the top bar, the LIVE bar, **F**, or **🕘 Full history** in a room.
