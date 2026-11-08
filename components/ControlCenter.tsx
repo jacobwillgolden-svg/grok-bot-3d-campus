@@ -2140,6 +2140,7 @@ function RoomPanel(props: { team: Team; idx: number; t: number; tab: PanelTab; m
         <span style={{ fontSize: 13.5, lineHeight: "19px" }}>{props.fresh["a:" + team.id + ":" + a.time + ":" + a.text.slice(0, 40)] && <b style={{ color: th.text.accent }}>✦ </b>}{a.text}</span>
       </div>
     )) : <div style={{ padding: "18px 0", textAlign: "center", color: th.text.tertiary, fontSize: 14 }}>Quiet here</div>;
+    body = <div>{body}<button onClick={() => OPEN_HISTORY && OPEN_HISTORY(team.id)} style={{ display: "block", width: "100%", marginTop: 10, font: "inherit", fontSize: 13.5, fontWeight: 600, padding: "8px 12px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, cursor: "pointer" }}>🕘 Full history for {team.name}</button></div>;
   } else {
     body = (
       <div>
@@ -2367,7 +2368,7 @@ function Room3D(props: { team: Team; idx: number; t: number; vp: { w: number; h:
           </div>
         </div>
         <div style={{ flex: "1 1 auto", minWidth: 0, background: "#0d0d0d", border: `5px solid ${th.border.strong}`, borderRadius: 14, padding: "6px 10px", boxShadow: `inset 0 0 30px ${tc}22` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: th.text.danger, marginBottom: 2 }}><span style={{ width: 8, height: 8, borderRadius: 4, background: th.text.danger, opacity: 0.5 + 0.5 * Math.sin(t * 5) }} />Live from the room</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: th.text.danger, marginBottom: 2 }}><span style={{ width: 8, height: 8, borderRadius: 4, background: th.text.danger, opacity: 0.5 + 0.5 * Math.sin(t * 5) }} />Live from the room<button onClick={(e: any) => { e.stopPropagation(); if (OPEN_HISTORY) OPEN_HISTORY(team.id); }} style={{ marginInlineStart: "auto", font: "inherit", fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 999, border: "none", background: th.fill.secondary, color: th.text.primary, cursor: "pointer" }}>🕘 Full history</button></div>
           {team.activity.length ? team.activity.map((a, i) => (
             <div key={i} style={{ display: "flex", gap: 8, padding: "6px 0", borderBottom: `1px solid ${th.border.weak}` }}>
               <b dir="ltr" style={{ fontSize: 12, color: th.text.accent, whiteSpace: "nowrap", minWidth: 54 }}>{a.time}</b>
@@ -2722,8 +2723,141 @@ function Room3D(props: { team: Team; idx: number; t: number; vp: { w: number; h:
   );
 }
 
+// ---- history: every bot event and every request you sent, kept past each refresh ----
+// The real app archives each data push in the private Blob (/api/history). The page merges that archive
+// with the events in the current data, so nothing is lost even before the first archived push.
+type HistEntry = { k: string; kind: "event" | "sent"; team: string; teamName: string; time: string; text: string; at: number };
+let OPEN_HISTORY: ((team?: string) => void) | null = null;
+const DAY = 864e5;
+// wall-clock time in TZ as a UTC-based number (only for ordering and day groups)
+function wallOf(ms: number): number {
+  try {
+    const p = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(ms));
+    const g = (k: string) => Number((p.find((x) => x.type === k) || { value: "0" }).value);
+    return Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"));
+  } catch (e) { return ms; }
+}
+// "D.M HH:MM", "D.M.YYYY, HH:MM" or ISO → wall time; the year comes from `ref` (when the event was seen)
+function wallOfStamp(s: string, ref: number): number | null {
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) { const v = Date.parse(s); return isNaN(v) ? null : wallOf(v); }
+  const m = s.match(/(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?,?(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (!m) return null;
+  const r = wallOf(ref);
+  let y = m[3] ? (m[3].length === 2 ? 2000 + +m[3] : +m[3]) : new Date(r).getUTCFullYear();
+  let w = Date.UTC(y, +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0));
+  if (!m[3] && w > r + 2 * DAY) w = Date.UTC(y - 1, +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0));
+  return w;
+}
+const hhmm = (w: number) => new Date(w).toISOString().slice(11, 16);
+function dayLabel(w: number, todayW: number): string {
+  const d0 = Math.floor(todayW / DAY), d = Math.floor(w / DAY);
+  const name = new Date(w).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
+  return d === d0 ? `Today · ${name}` : d === d0 - 1 ? `Yesterday · ${name}` : name;
+}
+// a sent line looks like "Approved — Finance: …"; find the team it was about
+function sentTeam(text: string): Team | undefined {
+  const i = text.indexOf(" — ");
+  if (i < 0) return undefined;
+  const rest = text.slice(i + 3);
+  return TEAMS.find((tm) => rest.startsWith(tm.name + ":"));
+}
+
+function HistoryPanel(props: { open: boolean; onClose: () => void; startTeam: string | null; server: HistEntry[]; local: HistEntry[]; loading: boolean; idxOf: Record<string, number>; fresh: Record<string, boolean>; onEnter: (team: string) => void; phone: boolean }) {
+  const th = useGrokTheme();
+  const cats = th.dataviz.categorical;
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState<string>("all"); // "all" | "you" | team id
+  const [shown, setShown] = useState(150);
+  const inputRef = useRef<any>(null);
+  useEffect(() => {
+    // closed: give the keyboard back to the page shortcuts
+    if (!props.open) { try { if (inputRef.current) inputRef.current.blur(); } catch (e) {} return; }
+    setSel(props.startTeam || "all"); setShown(150); setQ("");
+    const id = setTimeout(() => { try { if (!props.phone && inputRef.current) inputRef.current.focus(); } catch (e) {} }, 260);
+    return () => clearTimeout(id);
+  }, [props.open, props.startTeam]);
+
+  const now = nowMs();
+  const todayW = wallOf(now);
+  type Row = HistEntry & { w: number | null; color: string; label: string };
+  const byKey: Record<string, Row> = {};
+  const add = (e: HistEntry) => {
+    if (byKey[e.k]) return;
+    const tm = e.kind === "sent" ? sentTeam(e.text) : TEAMS.find((x) => x.id === e.team);
+    const team = tm ? tm.id : e.team;
+    byKey[e.k] = {
+      ...e, team,
+      w: e.kind === "sent" ? wallOf(e.at) : wallOfStamp(e.time, e.at),
+      color: tm ? cats[(props.idxOf[tm.id] || 0) % cats.length] : th.text.tertiary,
+      label: e.kind === "sent" ? (tm ? `You → ${tm.name}` : "You → main bot") : (tm ? tm.name : e.teamName || e.team),
+    };
+  };
+  // current data first (it has the live team names), then the archive, then what this tab sent (demo)
+  TEAMS.forEach((tm) => tm.activity.forEach((a) => add({ k: `a:${tm.id}:${a.time}:${a.text}`, kind: "event", team: tm.id, teamName: tm.name, time: a.time, text: a.text, at: now })));
+  props.server.forEach(add);
+  props.local.forEach(add);
+  const all = Object.values(byKey).sort((a, b) => (b.w ?? -1) - (a.w ?? -1) || b.at - a.at);
+  const counts: Record<string, number> = {};
+  all.forEach((r) => { const c = r.kind === "sent" ? "you" : r.team; counts[c] = (counts[c] || 0) + 1; });
+  const ql = q.trim().toLowerCase();
+  const rows = all.filter((r) => (sel === "all" || (sel === "you" ? r.kind === "sent" : r.kind === "event" && r.team === sel)) && (!ql || (r.text + " " + r.label).toLowerCase().includes(ql)));
+  const page = rows.slice(0, shown);
+  const oldest = all.length ? all[all.length - 1].w : null;
+
+  const chip = (id: string, label: string, n: number, color?: string) => (
+    <button key={id} onClick={() => { setSel(id); setShown(150); }} style={{ display: "flex", alignItems: "center", gap: 6, flex: "none", font: "inherit", fontSize: 13, fontWeight: 600, padding: "6px 11px", borderRadius: 999, cursor: "pointer", border: `1px solid ${sel === id ? th.fill.accent : th.border.default}`, background: sel === id ? th.fill.accentSubtle : th.bg.base, color: th.text.primary, whiteSpace: "nowrap" }}>
+      {color && <span style={{ width: 8, height: 8, borderRadius: 4, background: color }} />}{label}<span style={{ color: th.text.tertiary, fontWeight: 500 }}>{n}</span>
+    </button>
+  );
+  let lastDay = "";
+  return (
+    <div role="dialog" aria-label="History" aria-hidden={!props.open} style={{ position: "absolute", top: props.phone ? 8 : 64, bottom: props.phone ? 8 : 14, insetInlineEnd: props.phone ? 8 : 14, width: props.phone ? "calc(100% - 16px)" : "min(520px, calc(100% - 28px))", zIndex: 11, display: "flex", flexDirection: "column", background: th.bg.elevated, border: `1px solid ${th.border.strong}`, borderRadius: 20, boxShadow: "0 18px 50px rgba(0,0,0,.55)", overflow: "hidden", opacity: props.open ? 1 : 0, transform: props.open ? "translateX(0)" : "translateX(24px)", pointerEvents: props.open ? "auto" : "none", visibility: props.open ? "visible" : "hidden", transition: "opacity 220ms, transform 220ms, visibility 220ms" }}>
+      <div style={{ padding: "14px 14px 10px", borderBottom: `1px solid ${th.border.weak}`, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <b style={{ fontSize: 18 }}>History</b>
+          <span style={{ fontSize: 13, color: th.text.tertiary }}>{all.length} {all.length === 1 ? "entry" : "entries"}{oldest !== null ? ` · since ${new Date(oldest).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" })}` : ""}{props.loading ? " · loading…" : ""}</span>
+          <button onClick={props.onClose} aria-label="Close history" title="Close (Esc)" style={{ marginInlineStart: "auto", width: 32, height: 32, borderRadius: 16, border: "none", background: th.fill.secondary, color: th.text.primary, cursor: "pointer", font: "inherit", fontSize: 15 }}>✕</button>
+        </div>
+        <input ref={inputRef} value={q} onChange={(e) => { setQ(e.target.value); setShown(150); }} placeholder="Search what the bots did or what you sent…" style={{ font: "inherit", fontSize: 14, padding: "9px 12px", borderRadius: 12, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, outline: "none" }} />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 96, overflowY: "auto" }}>
+          {chip("all", "All", all.length)}
+          {(counts.you || 0) > 0 && chip("you", "Sent by you", counts.you, th.fill.accent)}
+          {TEAMS.filter((tm) => counts[tm.id]).map((tm) => chip(tm.id, tm.name, counts[tm.id], cats[(props.idxOf[tm.id] || 0) % cats.length]))}
+        </div>
+      </div>
+      <div style={{ flex: "1 1 auto", overflowY: "auto", padding: "0 14px 14px" }}>
+        {page.length === 0 && <div style={{ padding: "40px 0", textAlign: "center", color: th.text.tertiary, fontSize: 14 }}>{ql ? "Nothing matches your search" : "No history yet"}</div>}
+        {page.map((r) => {
+          const day = r.w === null ? "Earlier" : dayLabel(r.w, todayW);
+          const head = day !== lastDay ? <div style={{ position: "sticky", top: 0, zIndex: 1, background: th.bg.elevated, padding: "12px 0 6px", fontSize: 12, fontWeight: 700, letterSpacing: 0.3, color: th.text.secondary, textTransform: "uppercase" }}>{day}</div> : null;
+          lastDay = day;
+          const isNew = props.fresh["a:" + r.team + ":" + r.time + ":" + r.text.slice(0, 40)];
+          const sent = r.kind === "sent";
+          return (
+            <div key={r.k}>
+              {head}
+              <button onClick={() => { if (TEAMS.some((x) => x.id === r.team)) props.onEnter(r.team); }} title={sent ? "" : "Open this team's room"} style={{ display: "flex", gap: 10, width: "100%", textAlign: "start", font: "inherit", color: th.text.primary, cursor: "pointer", padding: "9px 10px", marginBottom: 6, borderRadius: 14, border: `1px solid ${isNew ? th.fill.accent : th.border.subtle}`, background: sent ? th.fill.accentSubtle : th.bg.base }}>
+                <span style={{ width: 4, flex: "none", alignSelf: "stretch", borderRadius: 2, background: r.color }} />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "flex", alignItems: "baseline", gap: 8, fontSize: 12.5 }}>
+                    <b style={{ color: sent ? th.text.accent : r.color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sent ? "✉ " : ""}{r.label}</b>
+                    {isNew && <b style={{ color: th.text.accent }}>✦ new</b>}
+                    <span dir="ltr" style={{ marginInlineStart: "auto", color: th.text.tertiary, whiteSpace: "nowrap" }}>{r.w === null ? r.time : hhmm(r.w)}</span>
+                  </span>
+                  <span style={{ display: "block", fontSize: 14.5, lineHeight: "21px", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{r.text}</span>
+                </span>
+              </button>
+            </div>
+          );
+        })}
+        {rows.length > shown && <div style={{ textAlign: "center", padding: "6px 0 4px" }}><button onClick={() => setShown(shown + 150)} style={{ font: "inherit", fontSize: 13.5, fontWeight: 600, padding: "8px 16px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: th.bg.base, color: th.text.primary, cursor: "pointer" }}>Show older ({rows.length - shown} more)</button></div>}
+      </div>
+    </div>
+  );
+}
+
 // ---- the control center (3D workspace + HUD) ----
-type SearchHit = { key: string; icon: string; label: string; sub: string; team: string; what?: PanelTab; member?: number };
+type SearchHit ={ key: string; icon: string; label: string; sub: string; team: string; what?: PanelTab; member?: number };
 function ControlCenterInner() {
   const th = useGrokTheme();
   const cats = th.dataviz.categorical;
@@ -2733,7 +2867,26 @@ function ControlCenterInner() {
   const [inWall, setInWall] = useState<InWall>(0);
   const [inFocus, setInFocus] = useState(false);
   const [hot, setHot] = useState<string | null>(null);
-  const [feedOpen, setFeedOpen] = useState(false);
+  const [feedOpen, setFeedOpen] = useState(false); // the History panel
+  const [histTeam, setHistTeam] = useState<string | null>(null);
+  const [hist, setHist] = useState<HistEntry[]>([]);
+  const [histLoading, setHistLoading] = useState(false);
+  const [sentLocal, setSentLocal] = useState<HistEntry[]>([]); // demo only: the real app reads sent requests from /api/history
+  const loadHistory = async () => {
+    if (DEMO) return;
+    setHistLoading(true);
+    try {
+      const r = await fetch("/api/history?ts=" + Date.now(), { cache: "no-store" });
+      if (r.ok) { const j = await r.json(); if (Array.isArray(j.entries)) setHist(j.entries); }
+    } catch (e) {}
+    setHistLoading(false);
+  };
+  useEffect(() => {
+    if (!feedOpen) return;
+    loadHistory();
+    const id = setInterval(loadHistory, 120000);
+    return () => clearInterval(id);
+  }, [feedOpen]);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
   const [toast, setToast] = useState<{ msg: string; ok: boolean; t0: number; kind?: "tray" | "batch" | "queued" | "sent" | "failed" | "wait"; err?: string } | null>(null);
@@ -2866,6 +3019,8 @@ function ControlCenterInner() {
       // demo: nothing leaves the browser; the simulation plays the team's follow-up
       await new Promise((r) => setTimeout(r, 650));
       DEMO.send(items);
+      const at0 = Date.now();
+      setSentLocal((l) => [...items.map((m, i) => ({ k: `s:${at0}:${i}`, kind: "sent" as const, team: "", teamName: "", time: "", text: m, at: at0 })), ...l]);
       setQueue((q) => q.filter((x) => !items.includes(x)));
       setToast({ msg: fmt(items), ok: true, t0: t, kind: "sent" });
       setSending(false);
@@ -2878,6 +3033,7 @@ function ControlCenterInner() {
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.ok) {
         setQueue((q) => q.filter((x) => !items.includes(x)));
+        if (feedOpen) loadHistory();
         setToast({ msg: fmt(items), ok: true, t0: t, kind: "sent" });
         setSending(false);
         return;
@@ -2887,6 +3043,8 @@ function ControlCenterInner() {
     setSending(false);
     copyText(fmt(items), "failed", err);
   };
+  const openHistory = (team?: string | null) => { setHistTeam(team || null); setFeedOpen(true); setInboxOpen(false); setDrawer(null); setSearch(null); setNewsOpen(false); };
+  OPEN_HISTORY = openHistory;
   const openDrawer = (d: "tray" | "clock" | "usage") => { setDrawer(drawer === d ? null : d); setFeedOpen(false); setInboxOpen(false); setSearch(null); setNewsOpen(false); };
   const now = nowMs();
   const allR = TEAMS.flatMap((tm) => (tm.routines || []).map((r) => ({ r, team: tm, at: nextAt(r) })));
@@ -2994,7 +3152,7 @@ function ControlCenterInner() {
     else if (k === "w" || k === "W") { if (phone) setSheet(sheet === "work" ? null : "work"); else setColW(!colW); }
     else if (k === "n" || k === "N") setNewsOpen(!newsOpen);
     else if (k === "m" || k === "M") openDrawer("tray");
-    else if (k === "f" || k === "F") { setFeedOpen(!feedOpen); setInboxOpen(false); setDrawer(null); }
+    else if (k === "f" || k === "F") { if (feedOpen) setFeedOpen(false); else openHistory(room || filter); }
   };
   useEffect(() => {
     const w = globalThis as any;
@@ -3091,6 +3249,10 @@ function ControlCenterInner() {
         {fresh3 > 0 && (
           <button onClick={() => { setNewsOpen(!newsOpen); setSearch(null); }} title="What changed since your last visit (N)" style={{ display: "flex", alignItems: "center", gap: 4, background: th.fill.accent, border: "none", borderRadius: 999, padding: "3px 9px", cursor: "pointer", font: "inherit", fontSize: 12.5, fontWeight: 700, color: th.text.onColor, transform: `scale(${1 + 0.04 * Math.sin(t * 3)})` }}>✦ {fresh3}{phone ? "" : " new"}</button>
         )}
+        <button onClick={() => { if (feedOpen) setFeedOpen(false); else openHistory(room || filter); }} title="History: everything the bots did and what you sent (F)" style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: feedOpen ? th.text.accent : th.text.secondary }}>
+          <svg width={19} height={19} viewBox="0 0 20 20"><path d="M3.2 10 a6.8 6.8 0 1 0 2 -4.8" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" /><path d="M2.6 2.8 v3.4 h3.4" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" /><path d="M10 6.2 v4 l2.6 1.6" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" /></svg>
+          {!phone && <b style={{ fontSize: 13.5 }}>History</b>}
+        </button>
         <button onClick={() => setSearch(search ? null : { q: "", sel: 0 })} title="Search (/ or Ctrl+K)" style={{ display: "flex", alignItems: "center", background: "none", border: "none", padding: 0, cursor: "pointer", color: th.text.secondary }}>
           <svg width={18} height={18} viewBox="0 0 20 20"><circle cx={8.5} cy={8.5} r={6} fill="none" stroke="currentColor" strokeWidth={2} /><line x1={13} y1={13} x2={18} y2={18} stroke="currentColor" strokeWidth={2} strokeLinecap="round" /></svg>
         </button>
@@ -3138,7 +3300,7 @@ function ControlCenterInner() {
             <button onClick={() => enter(tick.team.id, "news")} style={{ opacity: tickO, transform: `translateY(${(1 - tickO) * 6}px)`, background: "none", border: "none", padding: 0, font: "inherit", fontSize: phone ? 13 : 14, lineHeight: phone ? "17px" : "19px", color: th.text.primary, cursor: "pointer", overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", minWidth: 0, flex: "1 1 0", textAlign: "start", alignSelf: "center", maxHeight: phone ? 34 : 38 } as any}>
               <b>{tick.team.name}</b> <span style={{ color: th.text.tertiary }}>{tick.time}</span> · {tick.text}
             </button>
-            <button onClick={() => { setFeedOpen(!feedOpen); setInboxOpen(false); setDrawer(null); }} style={{ font: "inherit", fontSize: 13, fontWeight: 600, padding: "6px 12px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: feedOpen ? th.fill.accentSubtle : th.bg.subtle, color: th.text.primary, cursor: "pointer", whiteSpace: "nowrap" }}>Full feed</button>
+            <button onClick={() => { if (feedOpen) setFeedOpen(false); else openHistory(filter); }} title="Everything the bots did and what you sent (F)" style={{ font: "inherit", fontSize: 13, fontWeight: 600, padding: "6px 12px", borderRadius: 999, border: `1px solid ${th.border.default}`, background: feedOpen ? th.fill.accentSubtle : th.bg.subtle, color: th.text.primary, cursor: "pointer", whiteSpace: "nowrap" }}>History</button>
           </div>
         </div>
       )}
@@ -3198,21 +3360,14 @@ function ControlCenterInner() {
       {help && (
         <div onClick={() => setHelp(false)} style={{ position: "absolute", top: 60, left: "50%", transform: "translateX(-50%)", width: "min(460px, calc(100% - 24px))", zIndex: 10, ...glass, borderRadius: 20, padding: "14px 18px" }}>
           <b style={{ fontSize: 15 }}>Keyboard shortcuts</b>
-          {[["/ or Ctrl+K", "Search"], ["1–9", "Open a team's room"], ["] / [", "Next / previous team (all teams, also past 9)"], ["Esc", "Close / back to campus"], ["A / W", "Approvals window / In-progress window"], ["N", "What's new since your last visit"], ["M", "Bot tray"], ["F", "Full feed"], ["+ / −", "Zoom"], ["Q / E", "Rotate the camera"], ["T", "Tilt the camera"], ["H", "Back to the overview"], ["Enter", "Enter the room (from the room view)"], ["← →", "In a room: switch boards"], ["Drag in a room", "look around · double-click: normal view"], ["↑ ↓", "In a room: previous / next room"], ["Drag", "pan · right/Shift+drag: rotate · wheel: zoom"]].map(([k, d]) => (
+          {[["/ or Ctrl+K", "Search"], ["1–9", "Open a team's room"], ["] / [", "Next / previous team (all teams, also past 9)"], ["Esc", "Close / back to campus"], ["A / W", "Approvals window / In-progress window"], ["N", "What's new since your last visit"], ["M", "Bot tray"], ["F", "History (all bot events and what you sent)"], ["+ / −", "Zoom"], ["Q / E", "Rotate the camera"], ["T", "Tilt the camera"], ["H", "Back to the overview"], ["Enter", "Enter the room (from the room view)"], ["← →", "In a room: switch boards"], ["Drag in a room", "look around · double-click: normal view"], ["↑ ↓", "In a room: previous / next room"], ["Drag", "pan · right/Shift+drag: rotate · wheel: zoom"]].map(([k, d]) => (
             <div key={k} style={{ display: "flex", gap: 10, fontSize: 13, padding: "5px 0", borderBottom: `1px solid ${th.border.weak}` }}><b dir="ltr" style={{ minWidth: 92, color: th.text.accent }}>{k}</b><span>{d}</span></div>
           ))}
         </div>
       )}
 
-      {/* feed drawer */}
-      <div style={{ position: "absolute", bottom: 70, insetInlineEnd: 14, width: "min(380px, calc(100% - 28px))", maxHeight: "min(65%, 520px)", overflowY: "auto", zIndex: 7, display: "flex", flexDirection: "column", gap: 8, padding: 4, opacity: feedOpen ? 1 : 0, transform: feedOpen ? "translateY(0)" : "translateY(20px)", pointerEvents: feedOpen ? "auto" : "none", transition: "opacity 250ms, transform 250ms" }}>
-        {feed.map((a, i) => (
-          <button key={i} onClick={() => enter(a.team.id, "news")} style={{ textAlign: "start", font: "inherit", cursor: "pointer", background: th.bg.elevated, border: `1px solid ${freshMap["a:" + a.team.id + ":" + a.time + ":" + a.text.slice(0, 40)] ? th.fill.accent : th.border.subtle}`, borderRadius: "18px 18px 18px 6px", padding: "8px 12px", boxShadow: "0 4px 14px rgba(0,0,0,.10)", color: th.text.primary }}>
-            <div style={{ fontSize: 12, color: th.text.tertiary }}><b style={{ color: th.text.accent }}>{a.team.name}</b> · {a.time}</div>
-            <div style={{ fontSize: 14, lineHeight: "20px" }}>{a.text}</div>
-          </button>
-        ))}
-      </div>
+      {/* history panel (was the small "Full feed" drawer) */}
+      <HistoryPanel open={feedOpen} onClose={() => setFeedOpen(false)} startTeam={histTeam} server={hist} local={sentLocal} loading={histLoading} idxOf={idxOf} fresh={freshMap} onEnter={(id) => enter(id, "news")} phone={phone} />
 
       {/* inbox drawer: all papers */}
       <div style={{ position: "absolute", top: 64, insetInlineStart: 14, insetInlineEnd: 14, maxHeight: "calc(100% - 150px)", overflowY: "auto", zIndex: 8, padding: "8px 6px 16px", opacity: inboxOpen ? 1 : 0, transform: inboxOpen ? "translateY(0)" : "translateY(-16px)", pointerEvents: inboxOpen ? "auto" : "none", transition: "opacity 250ms, transform 250ms" }}>
@@ -3319,7 +3474,7 @@ function ControlCenterInner() {
         <div style={{ position: "fixed", bottom: 76, left: "50%", transform: "translateX(-50%)", zIndex: 9, width: "max-content", maxWidth: "min(560px, 92vw)", background: th.bg.elevated, color: th.text.primary, border: `1px solid ${toast.kind === "sent" ? th.text.success : toast.kind === "failed" ? th.text.danger : th.border.default}`, borderRadius: 20, padding: "10px 16px", boxShadow: "0 10px 30px rgba(0,0,0,.25)", fontSize: 14, lineHeight: "20px" }} dir="ltr">
           <div style={{ fontWeight: 700, marginBottom: 2, color: toast.kind === "sent" ? th.text.success : toast.kind === "failed" ? th.text.danger : th.text.primary }}>{toast.kind === "queued" ? "Added to the bot tray" : toast.kind === "sent" ? "Sent to the bot ✓" : toast.kind === "wait" ? "One moment…" : toast.kind === "failed" ? `Sending failed${toast.err ? ` (${toast.err})` : ""}. ${toast.ok ? "Message copied — paste it to the bot:" : "Copy the message and paste it to the bot:"}` : toast.ok ? "Copied — paste it to the bot" : "Copy the message and paste it in your chat with the bot:"}</div>
           <div style={{ userSelect: "all", opacity: 0.9, whiteSpace: "pre-line", maxHeight: 140, overflowY: "auto" }}>{toast.msg}</div>
-          {toast.kind === "sent" && DEMO && <div style={{ marginTop: 4, fontSize: 12.5, color: th.text.secondary }}>Watch the feed: the team picks it up in a few seconds.</div>}
+          {toast.kind === "sent" && DEMO && <div style={{ marginTop: 4, fontSize: 12.5, color: th.text.secondary }}>Watch History: the team picks it up in a few seconds.</div>}
           {toast.kind === "queued" && (
             <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
               <button onClick={() => postItems([toast.msg])} disabled={sending} style={{ font: "inherit", fontSize: 13, fontWeight: 700, padding: "5px 12px", borderRadius: 999, border: "none", background: th.fill.accent, color: th.text.onColor, cursor: "pointer" }}>{sending ? "Sending…" : "📨 Send now"}</button>

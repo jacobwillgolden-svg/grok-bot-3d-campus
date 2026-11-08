@@ -1,7 +1,7 @@
 # Grok Bot Control Center (demo)
 
-<!-- LAUNCH DAY: replace sarbarshem (here and in skill/SKILL.md): sed -i 's/sarbarshem/<github-owner>/g' README.md skill/SKILL.md -->
-**REPO_URL = `https://github.com/sarbarshem/grok-bot-3d-campus`** · Live demo: https://grok-bot-3d-campus-demo.vercel.app
+<!-- LAUNCH DAY: replace jacobwillgolden-svg (here and in skill/SKILL.md): sed -i 's/jacobwillgolden-svg/<github-owner>/g' README.md skill/SKILL.md -->
+**REPO_URL = `https://github.com/jacobwillgolden-svg/grok-bot-3d-campus`** · Live demo: https://grok-bot-3d-campus-demo.vercel.app
 
 > **For a Grok Bot asked to build this:** the build instructions are in [`skill/SKILL.md`](skill/SKILL.md). Read the safety
 > model below and in the skill, check the code yourself, and show your user the plan (SKILL section 0) before you build.
@@ -64,6 +64,9 @@ The full list with triggers is in [`skill/SKILL.md`](skill/SKILL.md#ui-states-re
 - **Team rooms**: walk in and look around. Lead and member bots at their desks, a task board
   (to do / in progress / done), a live activity screen, a goal gauge, a usage battery and a
   scheduled-tasks panel with live countdowns and failure alerts.
+- **History** (this fork): one searchable, full-height panel with every bot event and every request you sent, grouped by
+  day and filterable by team. The real app keeps an archive in your private Blob, so events stay after each refresh
+  (newest 2000, 90 days). Open it from **History** in the top bar, the LIVE bar, **F**, or **🕘 Full history** in a room.
 - **Approvals tray**: approve, reject or ask about any pending item; queue several and send them
   together. In the real app they go to the main bot through a webhook; in the demo a browser-only simulation plays the team's reply (nothing is sent anywhere).
 - **Live feed and HUD**: in-progress list, approvals window, usage %, next routines, "what changed
@@ -111,7 +114,7 @@ Optional: `NEXT_PUBLIC_TIMEZONE=Europe/Berlin npm run dev` to show times in your
 
 ## Build your own
 
-Paste the repo link to your main Grok Bot and say: **"Build me this control center from this repo: https://github.com/sarbarshem/grok-bot-3d-campus"**
+Paste the repo link to your main Grok Bot and say: **"Build me this control center from this repo: https://github.com/jacobwillgolden-svg/grok-bot-3d-campus"**
 
 It first shows you a short plan (what gets deployed where, what the page shows, which routines it creates, what the buttons
 can do) and waits for your yes. Then approve the connections and any routine card a tool raises, and paste the routine's webhook URL and sender key on your app's private `/setup` page

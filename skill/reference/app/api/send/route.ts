@@ -1,5 +1,5 @@
 import { isAuthed, notFound404 } from "../../../lib/auth";
-import { lastRefreshAt, markRefresh, REFRESH_WINDOW_MS } from "../../../lib/store";
+import { appendHistory, lastRefreshAt, markRefresh, REFRESH_WINDOW_MS, sentEntries } from "../../../lib/store";
 import { getConfig } from "../../../lib/config";
 // Page buttons -> the bot's webhook routine. Body: { items: string[] } or { kind: "refresh" }; { dryRun: true } = health check.
 export const dynamic = "force-dynamic";
@@ -36,6 +36,7 @@ export async function POST(req: Request) {
     const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({ text, source: "control-center" }), signal: AbortSignal.timeout(8000), cache: "no-store" });
     if (!r.ok) { last = 0; return Response.json({ ok: false, error: r.status === 401 || r.status === 403 ? "Webhook key rejected" : `Webhook error ${r.status}` }, { status: 502 }); }
     if (isRefresh) { const at = Date.now(); await markRefresh(at); return Response.json({ ok: true, kind: "refresh", at, waitMs: REFRESH_WINDOW_MS }); }
+    try { await appendHistory(sentEntries(items)); } catch {} // shown under "Sent by you" in History
     return Response.json({ ok: true, count: items.length });
   } catch (e: any) {
     last = 0;
